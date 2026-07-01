@@ -1,0 +1,33 @@
+# Java / Maven
+target/
+*.class
+*.jar
+!*-sources.jar
+dependency-reduced-pom.xml
+
+# CDK
+cdk.out/
+cdk.context.json
+
+# Node / Frontend
+node_modules/
+dist/
+.env
+.env.local
+
+# AWS / Secrets
+.aws/
+*.pem
+credentials
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Log file
+*.log
