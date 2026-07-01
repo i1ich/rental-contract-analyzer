@@ -1,0 +1,42 @@
+// ARCHIVO DE PRUEBA FICTICIO — contrato inventado para tests automatizados de LeaseLens. No corresponde a una persona ni propiedad real.
+
+CONTRATO DE ARRENDAMIENTO DE VIVIENDA
+
+Entre la sociedad Inventada Propiedades S.R.L., en adelante "la Arrendadora", y el señor Pedro
+Ejemplo Rodríguez, en adelante "el Arrendatario", se celebra el presente contrato de
+arrendamiento respecto de la finca sita en Avenida Ficticia 4321, Montevideo, sujeto a las
+siguientes cláusulas:
+
+PRIMERA — PLAZO. El presente contrato tendrá una duración de doce (12) meses a partir del 1 de
+agosto de 2026.
+
+SEGUNDA — RENOVACIÓN. Vencido el plazo original, el contrato se renovará automáticamente por
+períodos sucesivos de doce meses, en las mismas condiciones, salvo que alguna de las partes
+comunique su voluntad de no renovar con una antelación mínima de sesenta días; sin embargo, de no
+mediar dicha comunicación fehaciente por escrito y con acuse de recibo, se entenderá tácitamente
+prorrogado sin límite de veces, quedando el Arrendatario obligado en los mismos términos
+indefinidamente.
+
+TERCERA — PRECIO Y AJUSTE. El precio mensual se fija en $25.000, ajustable automáticamente cada
+renovación según el índice que unilateralmente determine la Arrendadora, sin necesidad de previo
+aviso ni acuerdo del Arrendatario.
+
+CUARTA — DEPÓSITO. El Arrendatario entrega en garantía la suma de $50.000, equivalente a dos
+meses de alquiler.
+
+QUINTA — REPARACIONES. Cualquier desperfecto que se presente en la finca durante la vigencia del
+contrato, incluyendo daños derivados de humedad, cañerías o instalación eléctrica preexistente,
+será reparado exclusivamente a cargo y cuenta del Arrendatario, quedando la Arrendadora liberada
+de toda responsabilidad al respecto.
+
+SEXTA — GARANTE. El garante que suscribe el presente contrato acepta responder solidaria e
+ilimitadamente por cualquier deuda del Arrendatario, incluidas las generadas durante las
+prórrogas automáticas mencionadas en la cláusula segunda, sin necesidad de nueva notificación ni
+consentimiento expreso para cada renovación.
+
+SÉPTIMA — RESCISIÓN. Si el Arrendatario deseara retirarse antes del vencimiento del período
+vigente, deberá abonar una penalidad equivalente al cien por ciento (100%) del alquiler
+correspondiente a los meses restantes del período en curso.
+
+En prueba de conformidad, se firma el presente en Montevideo, en dos ejemplares de idéntico
+tenor.

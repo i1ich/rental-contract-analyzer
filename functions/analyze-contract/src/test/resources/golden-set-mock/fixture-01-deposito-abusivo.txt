@@ -1,0 +1,44 @@
+// ARCHIVO DE PRUEBA FICTICIO — contrato inventado para tests automatizados de LeaseLens. No corresponde a una persona ni propiedad real.
+
+CONTRATO DE ARRENDAMIENTO DE VIVIENDA
+
+Entre el señor Juan Ficticio Pérez, en adelante "el Arrendador", y la señora María Inventada
+Gómez, en adelante "la Arrendataria", domiciliada a efectos legales en la finca objeto de este
+contrato, ubicada en Bulevar Inventado 1234, apartamento 501, Montevideo, se celebra el presente
+contrato de arrendamiento de vivienda, el cual se regirá por las siguientes cláusulas:
+
+PRIMERA — OBJETO. El Arrendador da en arrendamiento a la Arrendataria el inmueble antes
+individualizado, con destino exclusivo a casa habitación, por el plazo de veinticuatro (24) meses
+a contar desde el 1 de julio de 2026.
+
+SEGUNDA — PRECIO. El precio del arrendamiento se fija en la suma de treinta mil pesos uruguayos
+($30.000) mensuales, que la Arrendataria pagará por adelantado dentro de los primeros cinco días
+de cada mes.
+
+TERCERA — DEPÓSITO EN GARANTÍA. La Arrendataria entregará en este acto, en concepto de depósito
+de garantía, la suma equivalente a SEIS (6) meses de alquiler, es decir $180.000, la cual el
+Arrendador podrá retener a su exclusivo criterio al finalizar el contrato, sin obligación de
+rendir cuentas ni de devolver saldo alguno, cualquiera sea el estado de la finca a la
+restitución.
+
+CUARTA — MANTENIMIENTO. Todos los gastos de mantenimiento, reparación y conservación de la
+finca, incluyendo reparaciones estructurales, de instalaciones sanitarias, eléctricas y de
+techos, correrán por cuenta exclusiva de la Arrendataria durante toda la vigencia del contrato,
+sin derecho a reembolso ni descuento alguno sobre el precio del arrendamiento, aun cuando el
+deterioro no le sea imputable.
+
+QUINTA — RESCISIÓN ANTICIPADA. En caso de que la Arrendataria decida rescindir el presente
+contrato antes de su vencimiento, deberá abonar como multa la totalidad de los meses de
+alquiler restantes hasta completar el plazo pactado, sin excepción ni posibilidad de
+negociación.
+
+SEXTA — GARANTÍA. El fiador solidario de la Arrendataria responderá de forma ilimitada en el
+tiempo por todas las obligaciones emergentes de este contrato y de sus eventuales prórrogas,
+aun después de la restitución de la finca y de la extinción del vínculo contractual con la
+Arrendataria original.
+
+SÉPTIMA — DOMICILIO. Las partes constituyen domicilio especial en los indicados precedentemente,
+donde se tendrán por válidas todas las notificaciones judiciales y extrajudiciales.
+
+En prueba de conformidad, se firman dos ejemplares de un mismo tenor en Montevideo, a los
+efectos y usos que correspondan.
