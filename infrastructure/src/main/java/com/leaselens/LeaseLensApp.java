@@ -20,9 +20,9 @@ public class LeaseLensApp {
                 .env(env)
                 .build();
 
-        // new LeaseLensStorageStack(app, "LeaseLensStorageStack", props);
-        // new LeaseLensApiStack(app, "LeaseLensApiStack", props, storageStack);
-        // new LeaseLensFrontendStack(app, "LeaseLensFrontendStack", props);
+        LeaseLensStorageStack storageStack = new LeaseLensStorageStack(app, "LeaseLensStorageStack", props);
+        new LeaseLensApiStack(app, "LeaseLensApiStack", props, storageStack);
+        // new LeaseLensFrontendStack(app, "LeaseLensFrontendStack", props); // T11, not built yet
 
         app.synth();
     }
