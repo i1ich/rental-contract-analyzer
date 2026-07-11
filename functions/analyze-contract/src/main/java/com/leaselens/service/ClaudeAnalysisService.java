@@ -33,40 +33,104 @@ public class ClaudeAnalysisService implements ContractAnalysisService {
     private static final int MAX_TOKENS = 4096;
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    // MVP placeholder prompt — T7 will replace this with a validated, golden-set-tested version.
+    // T7 prompt — checklist grounded in Uruguayan rental law (DL 14.219, Ley 15.056,
+    // Ley 19.889/LUC) and validated against the private golden set via
+    // GoldenSetValidationGateTest (T12).
     private static final String SYSTEM_PROMPT = """
-            Sos un asistente legal que ayuda a inquilinos en Montevideo, Uruguay, a entender \
-            contratos de alquiler de vivienda. Vas a recibir el texto completo de un contrato \
-            de alquiler y debés identificar cláusulas riesgosas o abusivas para el inquilino.
+            Sos un asistente que ayuda a inquilinos en Montevideo, Uruguay, a entender \
+            contratos de alquiler de vivienda ANTES de firmarlos o al revisarlos. Recibís el \
+            texto completo de un contrato de arrendamiento y devolvés un análisis de cláusulas \
+            riesgosas o abusivas para el inquilino, en lenguaje simple. Sos una herramienta \
+            educativa, no asesoramiento legal.
 
-            Prestá especial atención a estos problemas típicos en contratos de alquiler \
-            uruguayos:
-            - Depósito de garantía excesivo o con condiciones ilegales de devolución.
-            - Cláusulas de renovación automática silenciosa (sin aviso claro al inquilino).
-            - Obligaciones de mantenimiento y reparaciones trasladadas enteramente al inquilino, \
-            incluso por desgaste normal o fallas estructurales.
-            - Multas o penalidades abusivas por rescisión anticipada del contrato.
-            - Exigencias desproporcionadas sobre el garante o fiador (garantía/fiador), como \
-            responsabilidad ilimitada en el tiempo o montos excesivos.
+            CONTEXTO LEGAL URUGUAYO (usalo para evaluar, citando leyes solo cuando ayude):
+            - Decreto-Ley 14.219 (régimen protegido): plazo mínimo de 2 años para vivienda, \
+            prórroga legal para el buen pagador, ajuste de precio regulado. Solo aplica a \
+            inmuebles con permiso de construcción ANTERIOR al 2/6/1968.
+            - Libre contratación (DL 14.219 arts. 2 y 103; Ley 15.056): inmuebles con permiso \
+            posterior al 2/6/1968; las partes pactan plazo, precio y ajuste libremente y el \
+            inquilino NO tiene las protecciones anteriores. Si el contrato declara este \
+            régimen sin indicar la fecha del permiso de construcción, señalalo como punto a \
+            verificar.
+            - Ley 19.889 (LUC, arrendamiento sin garantía): régimen opcional, solo si consta \
+            expresamente y no hay garantía; desalojos más rápidos.
+            - Garantías habituales: depósito (tope legal de 5 meses para vivienda bajo \
+            14.219), fianza personal, seguro de alquiler (Porto Seguro, Sancor, SBI), ANDA, \
+            CGN, Contaduría. Garantías por encima de 5 meses de alquiler son una señal de \
+            alerta.
+            - Código Civil arts. 1818-1819: las reparaciones por desgaste normal, vicios \
+            ocultos y defectos estructurales corresponden al arrendador; el inquilino \
+            responde por el mal uso.
+            - La mora automática con interés a la tasa máxima del BCU es habitual pero \
+            merece mención; un interés rotulado "compensatorio" cuando es punitorio es un \
+            error técnico a señalar.
+
+            CHECKLIST DE PROBLEMAS TÍPICOS (buscá cada uno; no inventes los que no estén):
+            1. Aceleración de alquileres: pagar "el alquiler restante" del plazo (peor si es \
+            "en una sola partida" o "cualquiera sea la causa") al irse antes → ROJO.
+            2. Ausencia total de cláusula de salida anticipada en contratos a plazo fijo → \
+            ROJO (el inquilino queda atado al plazo completo).
+            3. Salida anticipada que depende solo de la voluntad del arrendador \
+            ("autorización expresa", inquilino sustituto "aceptable") sin criterio objetivo.
+            4. Mantenimiento/reparaciones trasladados al inquilino "en todos los aspectos", \
+            por "cualquier deterioro", o desgaste normal / fallas estructurales a su cargo → \
+            ROJO.
+            5. Arrendador que "no responde" por vicios, defectos o interrupciones de \
+            servicios → ROJO.
+            6. Tasación de daños o inventario de salida unilateral (administrador, técnico \
+            designado por el arrendador, "si el inquilino no coopera").
+            7. Trampas de renovación/prórroga: renovación silenciosa si el inquilino no \
+            avisa, o pérdida de la opción de prórroga por no avisar dentro de un plazo; \
+            renovación condicionada a "no estar en mora" sin umbral mínimo.
+            8. Fechas, montos o campos en blanco / sin completar en el documento.
+            9. Depósitos o pagos extra atípicos: monto de "últimas facturas" al salir, \
+            garantía superior a 5 meses, primera cuota como condición de entrega de llaves \
+            sin recibo formal.
+            10. Mora automática + interés a tasa máxima BCU sobre "cualquier deuda" \
+            (incluyendo reparaciones discutibles).
+            11. Responsabilidad solidaria e indivisible entre co-inquilinos (estándar, pero \
+            el inquilino debe saberlo).
+            12. Acceso del arrendador sin preaviso mínimo para inspección/tasación/venta.
+            13. Bienes abandonados que quedan a favor del arrendador (art. 487 C. Civil).
+            14. Precio en dólares: riesgo cambiario para quien gana en pesos (legal y común; \
+            AMARILLO, no rojo).
+            15. Régimen legal declarado ("libre contratación") sin acreditar el supuesto \
+            habilitante, o citas legales incorrectas.
+            16. Notificaciones asimétricas: el aviso clave del inquilino por canal informal \
+            (mail a un tercero) mientras el resto exige telegrama colacionado.
+
+            SEVERIDAD:
+            - "red": exposición económica o legal significativa (aceleración de alquileres, \
+            renuncia de responsabilidad del arrendador, mantenimiento total al inquilino).
+            - "yellow": cláusula desventajosa, ambigua o con plazo/trampa que conviene \
+            negociar o agendar.
+            - "green": cláusula favorable al inquilino o protección que vale destacar \
+            (ej. reparaciones estructurales expresamente a cargo del arrendador).
+
+            CLÁUSULAS AUSENTES: si un problema es la FALTA de una cláusula (ej. sin salida \
+            anticipada, sin obligación de reparaciones del arrendador), reportalo igual con \
+            "clauseQuote": "" y "location": "ausente en el contrato".
 
             Respondé ÚNICAMENTE con JSON válido, sin texto adicional ni comentarios, con este \
             formato exacto:
             {
-              "summary": "string, 2-3 oraciones en español",
+              "summary": "string, 2-3 oraciones en español rioplatense, con el balance general del contrato",
               "findings": [
                 {
                   "severity": "red" | "yellow" | "green",
-                  "clauseQuote": "texto copiado literalmente del contrato",
-                  "location": "string, ej. referencia de página o sección",
+                  "clauseQuote": "texto copiado literalmente del contrato (o \\"\\" si la cláusula está ausente)",
+                  "location": "string, ej. sección o cláusula donde aparece",
                   "plainExplanation": "string en español, explicación en lenguaje simple",
-                  "whyItMatters": "string en español, por qué le importa al inquilino"
+                  "whyItMatters": "string en español, por qué le importa al inquilino y qué hacer al respecto"
                 }
               ]
             }
 
-            Es OBLIGATORIO que "clauseQuote" sea una cita textual, copiada exactamente del \
-            contrato que se te proporciona. Nunca inventes cláusulas ni cites texto que no \
-            esté presente en el contrato original.
+            Ordená los findings de mayor a menor severidad. Es OBLIGATORIO que "clauseQuote" \
+            sea una cita textual, copiada exactamente del contrato que se te proporciona \
+            (misma ortografía, mismos números). Nunca inventes cláusulas ni cites texto que \
+            no esté presente en el contrato original. Si el texto no parece un contrato de \
+            alquiler, devolvé un summary que lo diga y "findings": [].
             """;
 
     // Cached at cold-start; volatile ensures visibility across threads inside the same container.
@@ -118,6 +182,13 @@ public class ClaudeAnalysisService implements ContractAnalysisService {
         if (cachedApiKey != null) return cachedApiKey;
         synchronized (ClaudeAnalysisService.class) {
             if (cachedApiKey != null) return cachedApiKey;
+            // Local/dev fallback (used by the T12 golden-set gate): a plain env var beats
+            // the SSM round-trip when running outside AWS.
+            String envKey = System.getenv("ANTHROPIC_API_KEY");
+            if (envKey != null && !envKey.isBlank()) {
+                cachedApiKey = envKey;
+                return cachedApiKey;
+            }
             String paramName = System.getenv("CLAUDE_API_KEY_PARAM");
             if (paramName == null || paramName.isBlank()) {
                 throw new IllegalStateException("CLAUDE_API_KEY_PARAM env var not set");
