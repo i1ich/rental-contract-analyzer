@@ -28,13 +28,18 @@ modules must be packaged *before* `cdk synth`/`cdk deploy`:
 
 | Parameter | Type | Purpose |
 |---|---|---|
-| `/leaselens/claude-api-key` | `SecureString` | Anthropic API key, read at Lambda cold start |
-| `/leaselens/claude-model` | `String` | Claude model id (defaults to `claude-sonnet-5` if unset) |
+| `/leaselens/openrouter-api-key` | `SecureString` | OpenRouter API key, read at Lambda cold start |
+| `/leaselens/openrouter-model` | `String` | OpenRouter model id (defaults to `nvidia/nemotron-3-ultra-550b-a55b:free` if unset) |
 
 ```sh
-aws ssm put-parameter --name /leaselens/claude-api-key --type SecureString --value "sk-ant-..."
-aws ssm put-parameter --name /leaselens/claude-model --type String --value "claude-sonnet-5"
+aws ssm put-parameter --name /leaselens/openrouter-api-key --type SecureString --value "sk-or-v1-..."
+aws ssm put-parameter --name /leaselens/openrouter-model --type String --value "nvidia/nemotron-3-ultra-550b-a55b:free"
 ```
+
+LLM calls go through [OpenRouter](https://openrouter.ai) rather than the Anthropic API directly —
+one key, and the model is just a config string (`nvidia/nemotron-3-ultra-550b-a55b:free`,
+`anthropic/claude-sonnet-5`, ...), swappable via the `openrouter-model` param above
+without a redeploy.
 
 ## Deploy
 

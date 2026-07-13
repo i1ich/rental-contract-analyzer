@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.leaselens.model.AnalysisResult;
 import com.leaselens.model.Finding;
-import com.leaselens.service.ClaudeAnalysisService;
+import com.leaselens.service.OpenRouterAnalysisService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
@@ -24,18 +24,18 @@ import static org.junit.jupiter.api.Assertions.fail;
  * T12 — Validation gate against the real golden set (see mvp3 plan).
  *
  * Runs every contract in the private golden-set directory through the REAL
- * {@link ClaudeAnalysisService} (live Anthropic API call) and compares the findings against
- * the human annotations.
+ * {@link OpenRouterAnalysisService} (live call, routed through OpenRouter) and compares the
+ * findings against the human annotations.
  *
  * Gate criteria (the ship blocker): overall recall of annotated findings >= 80% AND zero
  * hallucinated quotes (every non-empty clauseQuote must be a verbatim substring of the
  * contract text, modulo whitespace/case/accents).
  *
  * Deliberately opt-in: it costs money and needs secrets, so it only runs when
- * GOLDEN_SET_DIR is set (plus ANTHROPIC_API_KEY, or AWS creds + CLAUDE_API_KEY_PARAM).
+ * GOLDEN_SET_DIR is set (plus OPENROUTER_API_KEY, or AWS creds + OPENROUTER_API_KEY_PARAM).
  * The golden set lives OUTSIDE this repo because it contains real PII:
  *   $env:GOLDEN_SET_DIR = "...\rental-contract-analyzer-private\golden-set"
- *   $env:ANTHROPIC_API_KEY = "..."
+ *   $env:OPENROUTER_API_KEY = "sk-or-v1-..."
  *   .\mvnw.cmd -pl functions/analyze-contract test "-Dtest=GoldenSetValidationGateTest"
  */
 @EnabledIfEnvironmentVariable(named = "GOLDEN_SET_DIR", matches = ".+")
@@ -59,7 +59,7 @@ class GoldenSetValidationGateTest {
         assertTrue(annotationFiles.size() >= 3,
                 "Golden set must contain >= 3 annotated contracts, found " + annotationFiles.size());
 
-        ClaudeAnalysisService service = new ClaudeAnalysisService();
+        OpenRouterAnalysisService service = new OpenRouterAnalysisService();
 
         int expectedTotal = 0;
         int matchedTotal = 0;

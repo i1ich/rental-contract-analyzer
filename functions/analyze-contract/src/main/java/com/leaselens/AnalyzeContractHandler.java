@@ -7,7 +7,7 @@ import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyResponseEvent
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.leaselens.model.AnalysisResult;
 import com.leaselens.model.AnalyzeContractRequest;
-import com.leaselens.service.ClaudeAnalysisService;
+import com.leaselens.service.OpenRouterAnalysisService;
 import com.leaselens.service.ContractAnalysisService;
 import com.leaselens.service.ExtractTextInvoker;
 import com.leaselens.service.ExtractTextResult;
@@ -55,7 +55,7 @@ public class AnalyzeContractHandler implements
 
     /** No-arg constructor used by the Lambda runtime: wires up real AWS clients. */
     public AnalyzeContractHandler() {
-        this(new LambdaExtractTextInvoker(), DynamoDbClient.create(), new ClaudeAnalysisService());
+        this(new LambdaExtractTextInvoker(), DynamoDbClient.create(), new OpenRouterAnalysisService());
     }
 
     /** Package-private constructor for tests: allows injecting fakes/mocks for all AWS-touching seams. */

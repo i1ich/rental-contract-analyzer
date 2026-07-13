@@ -24,13 +24,15 @@ import java.util.Map;
 public class LeaseLensApiStack extends Stack {
 
     /**
-     * SSM parameter holding the Anthropic (Claude) API key. Created OUTSIDE CloudFormation
+     * SSM parameter holding the OpenRouter API key. Created OUTSIDE CloudFormation
      * (see docs/DEPLOYMENT.md) as a {@code SecureString}, so CDK never sees or overwrites it.
+     * OpenRouter is a single-key router in front of many providers' models (Anthropic, OpenAI,
+     * free community models, etc.) — see {@code OpenRouterAnalysisService}.
      */
-    private static final String CLAUDE_API_KEY_PARAM = "/leaselens/claude-api-key";
+    private static final String OPENROUTER_API_KEY_PARAM = "/leaselens/openrouter-api-key";
 
-    /** Plain-String SSM parameter for the Claude model name — changeable without redeploying. */
-    private static final String CLAUDE_MODEL_PARAM = "/leaselens/claude-model";
+    /** Plain-String SSM parameter for the OpenRouter model id — changeable without redeploying. */
+    private static final String OPENROUTER_MODEL_PARAM = "/leaselens/openrouter-model";
 
     public LeaseLensApiStack(final Construct scope, final String id, final StackProps props,
                               final LeaseLensStorageStack storageStack) {
@@ -64,23 +66,23 @@ public class LeaseLensApiStack extends Stack {
                         "TABLE_NAME", storageStack.getAnalysesTable().getTableName(),
                         "EXTRACT_TEXT_FUNCTION_NAME", extractTextFn.getFunctionName(),
                         // Secret (SecureString) — fetched at runtime via SSM SDK, never in plain env vars.
-                        "CLAUDE_API_KEY_PARAM", CLAUDE_API_KEY_PARAM,
+                        "OPENROUTER_API_KEY_PARAM", OPENROUTER_API_KEY_PARAM,
                         // Model config (String) — fetched at runtime so it's changeable without redeploy.
-                        "CLAUDE_MODEL_PARAM", CLAUDE_MODEL_PARAM
+                        "OPENROUTER_MODEL_PARAM", OPENROUTER_MODEL_PARAM
                 ))
                 .build();
 
         storageStack.getAnalysesTable().grantReadWriteData(analyzeContractFn);
         extractTextFn.grantInvoke(analyzeContractFn);
 
-        // Allow analyze-contract to read the externally-managed SecureString Claude key and
+        // Allow analyze-contract to read the externally-managed SecureString OpenRouter key and
         // decrypt it, plus the plain-String model config parameter.
         String ssmBase = "arn:aws:ssm:" + getRegion() + ":" + getAccount() + ":parameter";
         analyzeContractFn.addToRolePolicy(PolicyStatement.Builder.create()
                 .actions(List.of("ssm:GetParameter"))
                 .resources(List.of(
-                        ssmBase + CLAUDE_API_KEY_PARAM,
-                        ssmBase + CLAUDE_MODEL_PARAM
+                        ssmBase + OPENROUTER_API_KEY_PARAM,
+                        ssmBase + OPENROUTER_MODEL_PARAM
                 ))
                 .build());
         analyzeContractFn.addToRolePolicy(PolicyStatement.Builder.create()

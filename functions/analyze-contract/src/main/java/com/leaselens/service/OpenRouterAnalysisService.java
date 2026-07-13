@@ -19,18 +19,30 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Calls the Anthropic Messages API to analyze rental contract text against a checklist of
- * common abusive/risky clauses seen in Uruguayan residential rental contracts.
+ * Calls OpenRouter's OpenAI-compatible chat completions endpoint to analyze rental contract
+ * text against a checklist of common abusive/risky clauses seen in Uruguayan residential
+ * rental contracts.
+ *
+ * OpenRouter is a single-key router in front of many providers' models (Anthropic, OpenAI,
+ * free community models, etc.) — the model to use is just a config string
+ * ({@code "anthropic/claude-sonnet-5"}, {@code "nvidia/nemotron-3-ultra-550b-a55b:free"}, ...),
+ * which is exactly the "LLM: swappable, config in SSM" locked decision from the plan.
  *
  * API key and model name are read once from SSM at cold start and cached for the lifetime of
  * the execution environment (mirrors VisionService's caching pattern in photolist-latam).
  */
-public class ClaudeAnalysisService implements ContractAnalysisService {
+public class OpenRouterAnalysisService implements ContractAnalysisService {
 
-    private static final String ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
-    private static final String ANTHROPIC_VERSION = "2023-06-01";
-    private static final String DEFAULT_MODEL = "claude-sonnet-5";
-    private static final int MAX_TOKENS = 4096;
+    private static final String OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
+    // Default model routed through OpenRouter — 1M context, strong reasoning for the T7 prompt's
+    // multi-step contract analysis, and free; override via the OPENROUTER_MODEL_PARAM SSM param
+    // (or OPENROUTER_MODEL env var locally) to try other OpenRouter models.
+    private static final String DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
+    // A real Uruguayan rental contract with this checklist commonly needs 5-8K completion
+    // tokens for the full findings JSON; 4096 silently truncated mid-JSON on the golden set
+    // (finish_reason "length") during the first live T12 run against OpenRouter. 12000 leaves
+    // headroom for longer/denser contracts.
+    private static final int MAX_TOKENS = 12000;
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     // T7 prompt — checklist grounded in Uruguayan rental law (DL 14.219, Ley 15.056,
@@ -147,15 +159,17 @@ public class ClaudeAnalysisService implements ContractAnalysisService {
         try {
             requestBody = buildRequestBody(contractText);
         } catch (IOException e) {
-            throw new RuntimeException("Failed to build Claude request", e);
+            throw new RuntimeException("Failed to build OpenRouter request", e);
         }
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(ANTHROPIC_MESSAGES_URL))
+                .uri(URI.create(OPENROUTER_CHAT_URL))
                 .timeout(Duration.ofSeconds(60))
-                .header("x-api-key", getApiKey())
-                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("Authorization", "Bearer " + getApiKey())
                 .header("Content-Type", "application/json")
+                // Optional but recommended by OpenRouter for attribution/rankings; harmless if ignored.
+                .header("HTTP-Referer", "https://github.com/i1ich/rental-contract-analyzer")
+                .header("X-Title", "LeaseLens")
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                 .build();
 
@@ -164,15 +178,15 @@ public class ClaudeAnalysisService implements ContractAnalysisService {
             response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new ServiceException("Claude API request failed: " + e.getMessage());
+            throw new ServiceException("OpenRouter API request failed: " + e.getMessage());
         } catch (IOException e) {
-            throw new ServiceException("Claude API request failed: " + e.getMessage());
+            throw new ServiceException("OpenRouter API request failed: " + e.getMessage());
         }
 
         if (response.statusCode() != 200) {
             // Do not leak contract text into error messages/logs — only status code and
             // the (contract-text-free) API error body are included.
-            throw new ServiceException("Claude API error: HTTP " + response.statusCode());
+            throw new ServiceException("OpenRouter API error: HTTP " + response.statusCode());
         }
 
         return parseAnalysisResult(response.body());
@@ -180,18 +194,18 @@ public class ClaudeAnalysisService implements ContractAnalysisService {
 
     private static String getApiKey() {
         if (cachedApiKey != null) return cachedApiKey;
-        synchronized (ClaudeAnalysisService.class) {
+        synchronized (OpenRouterAnalysisService.class) {
             if (cachedApiKey != null) return cachedApiKey;
             // Local/dev fallback (used by the T12 golden-set gate): a plain env var beats
             // the SSM round-trip when running outside AWS.
-            String envKey = System.getenv("ANTHROPIC_API_KEY");
+            String envKey = System.getenv("OPENROUTER_API_KEY");
             if (envKey != null && !envKey.isBlank()) {
                 cachedApiKey = envKey;
                 return cachedApiKey;
             }
-            String paramName = System.getenv("CLAUDE_API_KEY_PARAM");
+            String paramName = System.getenv("OPENROUTER_API_KEY_PARAM");
             if (paramName == null || paramName.isBlank()) {
-                throw new IllegalStateException("CLAUDE_API_KEY_PARAM env var not set");
+                throw new IllegalStateException("OPENROUTER_API_KEY_PARAM env var not set");
             }
             try (SsmClient ssm = SsmClient.create()) {
                 cachedApiKey = ssm.getParameter(GetParameterRequest.builder()
@@ -199,18 +213,26 @@ public class ClaudeAnalysisService implements ContractAnalysisService {
                         .parameter().value();
             }
             if (cachedApiKey == null || cachedApiKey.isBlank()) {
-                throw new IllegalStateException("Claude API key SSM param is empty: " + paramName);
+                throw new IllegalStateException("OpenRouter API key SSM param is empty: " + paramName);
             }
             return cachedApiKey;
         }
     }
 
-    /** Reads model name from SSM; falls back to DEFAULT_MODEL if param is absent or blank. */
+    /**
+     * Reads model name from an env var override first (for local runs), then SSM, then
+     * falls back to DEFAULT_MODEL if neither is set.
+     */
     private static String getModel() {
         if (cachedModel != null) return cachedModel;
-        synchronized (ClaudeAnalysisService.class) {
+        synchronized (OpenRouterAnalysisService.class) {
             if (cachedModel != null) return cachedModel;
-            String paramName = System.getenv("CLAUDE_MODEL_PARAM");
+            String envModel = System.getenv("OPENROUTER_MODEL");
+            if (envModel != null && !envModel.isBlank()) {
+                cachedModel = envModel;
+                return cachedModel;
+            }
+            String paramName = System.getenv("OPENROUTER_MODEL_PARAM");
             cachedModel = readSsmString(paramName, DEFAULT_MODEL);
             return cachedModel;
         }
@@ -231,17 +253,23 @@ public class ClaudeAnalysisService implements ContractAnalysisService {
     }
 
     private String buildRequestBody(String contractText) throws IOException {
-        ObjectNode message = MAPPER.createObjectNode();
-        message.put("role", "user");
-        message.put("content", contractText);
+        // OpenRouter speaks the OpenAI chat-completions shape: system prompt is its own
+        // message (not a top-level field like Anthropic's Messages API).
+        ObjectNode systemMessage = MAPPER.createObjectNode();
+        systemMessage.put("role", "system");
+        systemMessage.put("content", SYSTEM_PROMPT);
+
+        ObjectNode userMessage = MAPPER.createObjectNode();
+        userMessage.put("role", "user");
+        userMessage.put("content", contractText);
 
         ArrayNode messages = MAPPER.createArrayNode();
-        messages.add(message);
+        messages.add(systemMessage);
+        messages.add(userMessage);
 
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", getModel());
         body.put("max_tokens", MAX_TOKENS);
-        body.put("system", SYSTEM_PROMPT);
         body.set("messages", messages);
 
         return MAPPER.writeValueAsString(body);
@@ -251,23 +279,17 @@ public class ClaudeAnalysisService implements ContractAnalysisService {
         String assistantText;
         try {
             JsonNode root = MAPPER.readTree(responseBody);
-            JsonNode contentArray = root.path("content");
-            assistantText = null;
-            if (contentArray.isArray()) {
-                for (JsonNode block : contentArray) {
-                    if ("text".equals(block.path("type").asText())) {
-                        assistantText = block.path("text").asText(null);
-                        break;
-                    }
-                }
-            }
+            // OpenAI-compatible chat-completions envelope: choices[0].message.content
+            // (Anthropic's Messages API used a top-level "content" array instead).
+            JsonNode firstChoice = root.path("choices").path(0);
+            assistantText = firstChoice.path("message").path("content").asText(null);
             if (assistantText == null || assistantText.isBlank()) {
-                throw new ServiceException("Claude response missing text content block");
+                throw new ServiceException("OpenRouter response missing message content");
             }
         } catch (ServiceException e) {
             throw e;
-        } catch (IOException e) {
-            throw new ServiceException("Failed to parse Claude response envelope: " + e.getMessage());
+        } catch (Exception e) {
+            throw new ServiceException("Failed to parse OpenRouter response envelope: " + e.getMessage());
         }
 
         String json = extractJsonPayload(assistantText);
@@ -293,7 +315,7 @@ public class ClaudeAnalysisService implements ContractAnalysisService {
         } catch (IOException e) {
             // Do not include the raw assistant text (which embeds contract content) in the
             // exception message — only note that parsing failed.
-            throw new ServiceException("Failed to parse Claude analysis JSON");
+            throw new ServiceException("Failed to parse OpenRouter analysis JSON");
         }
     }
 
