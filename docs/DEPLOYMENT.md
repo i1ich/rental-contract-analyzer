@@ -1,7 +1,8 @@
 # Deployment
 
-Status as of T9: infrastructure code exists and synthesizes locally (`cdk synth`); nothing has
-been deployed to AWS yet. This doc covers what deploying will look like once we decide to ship.
+Status as of T4/T6/T10: infrastructure code exists and synthesizes locally (`cdk synth`);
+nothing has been deployed to AWS yet. This doc covers what deploying will look like once we
+decide to ship.
 
 ## Prerequisites
 
@@ -19,6 +20,7 @@ The CDK app loads Lambda code from prebuilt shaded jars (`Code.fromAsset(...)`),
 modules must be packaged *before* `cdk synth`/`cdk deploy`:
 
 ```sh
+./mvnw -f functions/generate-upload-url/pom.xml package
 ./mvnw -f functions/extract-text/pom.xml package
 ./mvnw -f functions/analyze-contract/pom.xml package
 ./mvnw -f infrastructure/pom.xml package
@@ -51,23 +53,44 @@ JAVA_HOME=/path/to/jdk21 npx aws-cdk@2.130.0 deploy LeaseLensApiStack
 
 ## What's NOT wired yet
 
-- **`POST /upload-url`** — the presigned-S3-PUT Lambda (T4) hasn't been built. Until it lands,
-  getting a PDF into the uploads bucket for a smoke test means putting it there manually
-  (`aws s3 cp contract.pdf s3://<ContractUploadsBucket name>/manual-test/contract.pdf`) and
-  passing that key as `objectKey` to `POST /analyze`.
-- **Frontend hosting (T11)** — no CloudFront/S3 static site stack yet.
-- **OCR fallback (T6)** — scanned/photographed PDFs currently return a clean `422` from
-  `analyze-contract` instead of being processed.
+- **Frontend hosting (T11)** — no CloudFront/S3 static site stack yet. The PWA (T10) has to be
+  run locally (`cd frontend && npm run dev`) pointed at the deployed API via `VITE_API_BASE_URL`
+  until T11 lands.
+- **Cost/abuse/privacy guards (T13)** — no API Gateway throttling; `generate-upload-url`'s max
+  file size check is a client-declared `fileSizeBytes` soft check only (see its Javadoc) — a
+  presigned PUT can't enforce an upload's actual byte count the way a presigned POST policy can.
+  Textract's per-run cost isn't budget-capped, only implicitly bounded by the polling timeout.
 - **CI/CD (T15)** — no GitHub Actions workflow yet; builds are local only.
 
 ## Smoke test (once deployed)
 
+With T4 (`POST /upload-url`) in place, the full flow is upload → analyze, no manual `aws s3 cp`
+needed:
+
 ```sh
-aws s3 cp sample-contract.pdf s3://<bucket>/manual-test/sample-contract.pdf
+# 1. Get a presigned PUT URL + object key.
+curl -X POST https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod/upload-url \
+  -H 'Content-Type: application/json' \
+  -d '{"fileSizeBytes": 123456}'
+# => {"uploadUrl": "...", "objectKey": "uploads/<uuid>.pdf", "requiredContentType": "application/pdf", "expiresInSeconds": 900}
+
+# 2. PUT the PDF to that URL — Content-Type MUST match requiredContentType exactly, or S3
+#    rejects the signature (403).
+curl -X PUT "<uploadUrl from step 1>" \
+  -H 'Content-Type: application/pdf' \
+  --data-binary @sample-contract.pdf
+
+# 3. Analyze it.
 curl -X POST https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod/analyze \
   -H 'Content-Type: application/json' \
-  -d '{"objectKey": "manual-test/sample-contract.pdf"}'
+  -d '{"objectKey": "<objectKey from step 1>"}'
 ```
 
-Expect a JSON body with `summary` and `findings[]` (or a `422` with a friendly Spanish message
-if the PDF has no usable text layer).
+Expect a JSON body with `summary` and `findings[]`. If the PDF has no native text layer,
+`analyze-contract` now transparently falls back to Textract OCR (T6) before deciding whether
+there's enough usable text — a `422` at that point means OCR itself came up empty (e.g. a
+low-quality scan), not simply "scanned PDFs aren't supported".
+
+The old manual-upload path (`aws s3 cp contract.pdf s3://<bucket>/manual-test/contract.pdf`,
+then passing that key straight to `/analyze`) still works too, e.g. for a quick test that skips
+presigning.

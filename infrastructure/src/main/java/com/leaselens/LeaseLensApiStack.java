@@ -13,13 +13,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Exposes the analysis pipeline over HTTP.
- *
- * <p>Only {@code POST /analyze} is wired so far. {@code POST /upload-url} (the
- * generate-upload-url Lambda, T4) has not been built yet — it lands separately and will add a
- * second resource here. Until then, {@code objectKey} passed to {@code /analyze} must come from
- * an object already present in the uploads bucket (e.g. placed there manually for smoke testing;
- * see docs/DEPLOYMENT.md).
+ * Exposes the analysis pipeline over HTTP: {@code POST /upload-url} (presigned S3 PUT, T4) and
+ * {@code POST /analyze} (orchestration, T8/T9).
  */
 public class LeaseLensApiStack extends Stack {
 
@@ -39,20 +34,46 @@ public class LeaseLensApiStack extends Stack {
         super(scope, id, props);
 
         // Lambda: extract-text — internal only, invoked Lambda-to-Lambda by analyze-contract,
-        // never exposed via API Gateway.
+        // never exposed via API Gateway. Timeout/memory sized for the T6 Textract OCR fallback
+        // (start job + poll, on top of the S3 read + PDFBox pass), not just the text-layer path.
         Function extractTextFn = Function.Builder.create(this, "ExtractTextFn")
                 .functionName("leaselens-extract-text")
                 .runtime(Runtime.JAVA_21)
                 .handler("com.leaselens.ExtractTextHandler::handleRequest")
                 .code(Code.fromAsset("../functions/extract-text/target/extract-text.jar"))
                 .memorySize(1024)
-                .timeout(Duration.seconds(30))
+                .timeout(Duration.seconds(60))
                 .environment(Map.of(
                         "BUCKET_NAME", storageStack.getContractUploadsBucket().getBucketName()
                 ))
                 .build();
 
         storageStack.getContractUploadsBucket().grantRead(extractTextFn);
+
+        // T6: extract-text needs to start/poll Textract's async text-detection job. Textract
+        // doesn't support resource-level restriction on these actions, hence "*".
+        extractTextFn.addToRolePolicy(PolicyStatement.Builder.create()
+                .actions(List.of("textract:StartDocumentTextDetection", "textract:GetDocumentTextDetection"))
+                .resources(List.of("*"))
+                .build());
+
+        // Lambda: generate-upload-url — public entry point for browsers to get a presigned S3
+        // PUT URL (T4), so uploads never proxy bytes through the backend.
+        Function generateUploadUrlFn = Function.Builder.create(this, "GenerateUploadUrlFn")
+                .functionName("leaselens-generate-upload-url")
+                .runtime(Runtime.JAVA_21)
+                .handler("com.leaselens.GenerateUploadUrlHandler::handleRequest")
+                .code(Code.fromAsset("../functions/generate-upload-url/target/generate-upload-url.jar"))
+                .memorySize(512)
+                .timeout(Duration.seconds(10))
+                .environment(Map.of(
+                        "BUCKET_NAME", storageStack.getContractUploadsBucket().getBucketName()
+                ))
+                .build();
+
+        // The presigned URL is signed with this Lambda's own credentials, so S3 checks this
+        // grant (not the browser's) when the presigned PUT actually happens.
+        storageStack.getContractUploadsBucket().grantPut(generateUploadUrlFn);
 
         // Lambda: analyze-contract — the public orchestration entry point.
         Function analyzeContractFn = Function.Builder.create(this, "AnalyzeContractFn")
@@ -61,7 +82,7 @@ public class LeaseLensApiStack extends Stack {
                 .handler("com.leaselens.AnalyzeContractHandler::handleRequest")
                 .code(Code.fromAsset("../functions/analyze-contract/target/analyze-contract.jar"))
                 .memorySize(512)
-                .timeout(Duration.seconds(60))
+                .timeout(Duration.seconds(120))
                 .environment(Map.of(
                         "TABLE_NAME", storageStack.getAnalysesTable().getTableName(),
                         "EXTRACT_TEXT_FUNCTION_NAME", extractTextFn.getFunctionName(),
@@ -100,6 +121,9 @@ public class LeaseLensApiStack extends Stack {
                         .allowHeaders(List.of("Content-Type"))
                         .build())
                 .build();
+
+        Resource uploadUrlResource = api.getRoot().addResource("upload-url");
+        uploadUrlResource.addMethod("POST", new LambdaIntegration(generateUploadUrlFn));
 
         Resource analyzeResource = api.getRoot().addResource("analyze");
         analyzeResource.addMethod("POST", new LambdaIntegration(analyzeContractFn));

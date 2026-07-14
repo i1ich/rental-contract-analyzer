@@ -78,19 +78,18 @@ public class AnalyzeContractHandler implements
 
             String objectKey = request.getObjectKey().trim();
 
+            // extract-text already falls back to Textract OCR (T6) when there's no native text
+            // layer, so "text too short" is the single signal here for "couldn't get usable
+            // text" — whether that's because it's not a contract, a blank page, or OCR came up
+            // empty on a low-quality scan.
             ExtractTextResult extracted = extractTextInvoker.extractText(objectKey);
-
-            if (!extracted.isHasTextLayer()) {
-                return jsonResponse(422, Map.of("error",
-                        "No pudimos leer el texto de este PDF (parece un documento escaneado). "
-                                + "El análisis de PDFs escaneados aún no está disponible."));
-            }
 
             String contractText = extracted.getText() == null ? "" : extracted.getText().trim();
             if (contractText.length() < MIN_CONTRACT_TEXT_LENGTH) {
                 return jsonResponse(422, Map.of("error",
-                        "No pudimos analizar este documento. Verificá que sea un contrato de "
-                                + "alquiler en formato PDF con texto."));
+                        "No pudimos extraer suficiente texto de este documento (incluso probando "
+                                + "reconocimiento óptico para escaneos). Verificá que sea un contrato "
+                                + "de alquiler en formato PDF legible."));
             }
 
             String contentHash = sha256Hex(contractText);

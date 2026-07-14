@@ -8,6 +8,7 @@ import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.textract.TextractClient;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -17,11 +18,16 @@ import java.util.Map;
  * text to work with. Invoked directly (Lambda-to-Lambda) by an orchestration Lambda, not
  * behind API Gateway, so this handler works with plain {@code Map<String, Object>}
  * payloads rather than the API Gateway proxy envelope.
+ *
+ * <p>When the PDF has no native text layer (scanned/photographed contract), falls back to
+ * OCR via {@link TextractOcrExtractor} (T6) so downstream code always gets a best-effort
+ * {@code text} value rather than an empty one.
  */
 public class ExtractTextHandler implements RequestHandler<Map<String, Object>, Map<String, Object>> {
 
     private final String bucketName = System.getenv("BUCKET_NAME");
     private final S3Client s3Client = S3Client.create();
+    private final TextractClient textractClient = TextractClient.create();
 
     @Override
     public Map<String, Object> handleRequest(Map<String, Object> input, Context context) {
@@ -37,11 +43,34 @@ public class ExtractTextHandler implements RequestHandler<Map<String, Object>, M
         byte[] pdfBytes = readObject(objectKey);
         PdfTextExtractor.ExtractionResult result = PdfTextExtractor.extract(pdfBytes);
 
+        if (result.hasTextLayer()) {
+            return toResponse(result.text(), result.pageCount(), true, result.source());
+        }
+
+        // No native text layer — fall back to Textract OCR. The document is already in S3,
+        // so Textract reads it directly by bucket/key; no bytes need to be re-uploaded.
+        String ocrText;
+        try {
+            ocrText = TextractOcrExtractor.extractText(textractClient, bucketName, objectKey);
+        } catch (Exception e) {
+            // OCR is best-effort: log only the failure class (never contract content) and fall
+            // through to an empty result. analyze-contract already treats too-little-text as a
+            // clean "couldn't analyze" 422 rather than surfacing a 500/502 for this.
+            System.err.println("Textract OCR failed for object [class=" + e.getClass().getName()
+                    + "]: " + e.getMessage());
+            return toResponse("", result.pageCount(), false, "none");
+        }
+
+        boolean ocrFoundText = ocrText != null && !ocrText.isBlank();
+        return toResponse(ocrText, result.pageCount(), false, ocrFoundText ? "ocr" : "none");
+    }
+
+    private Map<String, Object> toResponse(String text, int pageCount, boolean hasTextLayer, String source) {
         Map<String, Object> response = new HashMap<>();
-        response.put("text", result.text());
-        response.put("pageCount", result.pageCount());
-        response.put("hasTextLayer", result.hasTextLayer());
-        response.put("source", result.source());
+        response.put("text", text);
+        response.put("pageCount", pageCount);
+        response.put("hasTextLayer", hasTextLayer);
+        response.put("source", source);
         return response;
     }
 

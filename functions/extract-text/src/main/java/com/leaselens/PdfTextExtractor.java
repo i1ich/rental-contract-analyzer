@@ -38,8 +38,9 @@ public final class PdfTextExtractor {
             String normalizedText = normalizeWhitespace(rawText);
 
             boolean hasTextLayer = normalizedText.length() >= MIN_TEXT_LENGTH;
-            // T6 (later task) will add OCR fallback and a "source": "ocr" case when
-            // hasTextLayer is false here.
+            // When there's no native text layer, ExtractTextHandler falls back to Textract OCR
+            // (T6) and reports "source": "ocr" itself; "none" here is just this extractor's
+            // own answer before that fallback runs.
             String source = hasTextLayer ? "text-layer" : "none";
 
             return new ExtractionResult(normalizedText, pageCount, hasTextLayer, source);
