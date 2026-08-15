@@ -1,0 +1,276 @@
+.app {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 1.25rem 1rem 3rem;
+}
+
+.app__header {
+  text-align: center;
+  margin-bottom: 1.5rem;
+}
+
+.app__header h1 {
+  margin: 0;
+  font-size: 1.75rem;
+  color: #1f2937;
+}
+
+.app__header p {
+  margin: 0.25rem 0 0;
+  color: #4b5563;
+}
+
+/* Upload zone */
+
+.upload-zone-wrapper {
+  margin-bottom: 1rem;
+}
+
+.upload-zone {
+  border: 2px dashed #9ca3af;
+  border-radius: 0.75rem;
+  padding: 2.5rem 1.25rem;
+  text-align: center;
+  background: #ffffff;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.upload-zone:hover,
+.upload-zone:focus-visible {
+  border-color: #1f2937;
+  outline: none;
+}
+
+.upload-zone--drag-over {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.upload-zone--disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.upload-zone__title {
+  margin: 0;
+  font-weight: 600;
+  font-size: 1.05rem;
+}
+
+.upload-zone__subtitle {
+  margin: 0.35rem 0 0;
+  color: #6b7280;
+  font-size: 0.9rem;
+}
+
+.upload-zone__input {
+  display: none;
+}
+
+.field-error {
+  color: #dc2626;
+  font-size: 0.9rem;
+  margin: 0.5rem 0 0;
+}
+
+/* Status panel (uploading / analyzing / error) */
+
+.status-panel {
+  text-align: center;
+  padding: 2.5rem 1rem;
+}
+
+.status-panel p {
+  color: #374151;
+  margin: 0.75rem 0 0;
+}
+
+.status-panel--error p {
+  color: #dc2626;
+  margin-bottom: 1rem;
+}
+
+.spinner {
+  width: 2rem;
+  height: 2rem;
+  margin: 0 auto;
+  border: 3px solid #e5e7eb;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Buttons */
+
+.button {
+  display: inline-block;
+  padding: 0.65rem 1.25rem;
+  border-radius: 0.5rem;
+  border: none;
+  background: #1f2937;
+  color: #ffffff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.button--secondary {
+  background: transparent;
+  color: #1f2937;
+  border: 1px solid #1f2937;
+  width: 100%;
+  margin-top: 1.5rem;
+}
+
+.button--dev {
+  display: block;
+  width: 100%;
+  margin: 0.75rem 0;
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px dashed #d97706;
+}
+
+/* Disclaimer */
+
+.disclaimer {
+  margin-top: 1.5rem;
+  padding: 0.9rem 1rem;
+  background: #f3f4f6;
+  border-radius: 0.5rem;
+  font-size: 0.85rem;
+  color: #4b5563;
+}
+
+.disclaimer p {
+  margin: 0;
+}
+
+.disclaimer__privacy {
+  margin-top: 0.5rem !important;
+}
+
+/* Results */
+
+.results-view__summary h2 {
+  font-size: 1.1rem;
+  margin: 0 0 0.4rem;
+}
+
+.results-view__cached-note {
+  font-size: 0.85rem;
+  color: #6b7280;
+  font-style: italic;
+}
+
+.results-view__findings {
+  list-style: none;
+  margin: 1.25rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.results-view__no-findings {
+  color: #6b7280;
+  margin-top: 1rem;
+}
+
+/* Finding card */
+
+.finding-card {
+  border: 1px solid #e5e7eb;
+  border-left-width: 4px;
+  border-radius: 0.5rem;
+  padding: 0.9rem 1rem;
+  background: #ffffff;
+}
+
+.finding-card--red {
+  border-left-color: #dc2626;
+}
+
+.finding-card--yellow {
+  border-left-color: #d97706;
+}
+
+.finding-card--green {
+  border-left-color: #16a34a;
+}
+
+.finding-card__header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.severity-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.severity-dot--red {
+  background: #dc2626;
+}
+
+.severity-dot--yellow {
+  background: #d97706;
+}
+
+.severity-dot--green {
+  background: #16a34a;
+}
+
+.finding-card__severity-label {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.finding-card__location {
+  font-size: 0.8rem;
+  color: #6b7280;
+  margin-left: auto;
+}
+
+.finding-card__quote {
+  margin: 0 0 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: #f9fafb;
+  border-radius: 0.35rem;
+  font-size: 0.9rem;
+  font-style: italic;
+  color: #374151;
+}
+
+.finding-card__quote--absent {
+  color: #9ca3af;
+  font-style: normal;
+}
+
+.finding-card__explanation {
+  margin: 0 0 0.4rem;
+  font-size: 0.95rem;
+}
+
+.finding-card__why {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #4b5563;
+}
+
+@media (min-width: 480px) {
+  .app {
+    padding-top: 2rem;
+  }
+}

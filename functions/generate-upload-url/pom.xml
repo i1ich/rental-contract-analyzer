@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.leaselens</groupId>
-    <artifactId>extract-text</artifactId>
+    <artifactId>generate-upload-url</artifactId>
     <version>1.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
@@ -16,7 +16,6 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <aws.lambda.java.version>1.2.3</aws.lambda.java.version>
         <aws.sdk.version>2.25.0</aws.sdk.version>
-        <pdfbox.version>2.0.30</pdfbox.version>
     </properties>
 
     <dependencies>
@@ -26,24 +25,14 @@
             <version>${aws.lambda.java.version}</version>
         </dependency>
         <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-lambda-java-events</artifactId>
+            <version>3.11.4</version>
+        </dependency>
+        <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3</artifactId>
             <version>${aws.sdk.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>ssm</artifactId>
-            <version>${aws.sdk.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>dynamodb</artifactId>
-            <version>${aws.sdk.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.pdfbox</groupId>
-            <artifactId>pdfbox</artifactId>
-            <version>${pdfbox.version}</version>
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
@@ -70,7 +59,7 @@
                         <phase>package</phase>
                         <goals><goal>shade</goal></goals>
                         <configuration>
-                            <finalName>extract-text</finalName>
+                            <finalName>generate-upload-url</finalName>
                         </configuration>
                     </execution>
                 </executions>
@@ -79,15 +68,6 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
-                <configuration>
-                    <!-- ExtractTextHandler reads BUCKET_NAME from the environment even when its
-                         S3/vision/DynamoDB clients are injected fakes, so tests need dummy
-                         values to stay fully offline. -->
-                    <environmentVariables>
-                        <BUCKET_NAME>leaselens-uploads-test</BUCKET_NAME>
-                        <TABLE_NAME>leaselens-analyses-test</TABLE_NAME>
-                    </environmentVariables>
-                </configuration>
             </plugin>
         </plugins>
     </build>

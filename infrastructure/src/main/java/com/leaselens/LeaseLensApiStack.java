@@ -29,32 +29,63 @@ public class LeaseLensApiStack extends Stack {
     /** Plain-String SSM parameter for the OpenRouter model id — changeable without redeploying. */
     private static final String OPENROUTER_MODEL_PARAM = "/leaselens/openrouter-model";
 
+    /**
+     * Plain-String SSM parameter for the OpenRouter *vision* model id, used by extract-text's
+     * T6 OCR fallback ({@code OpenRouterVisionClient}) — independent from {@code
+     * OPENROUTER_MODEL_PARAM} since transcription and structured JSON analysis have different
+     * cost/quality tradeoffs. Shares the same API key.
+     */
+    private static final String OPENROUTER_VISION_MODEL_PARAM = "/leaselens/openrouter-vision-model";
+
     public LeaseLensApiStack(final Construct scope, final String id, final StackProps props,
                               final LeaseLensStorageStack storageStack) {
         super(scope, id, props);
 
         // Lambda: extract-text — internal only, invoked Lambda-to-Lambda by analyze-contract,
-        // never exposed via API Gateway. Timeout/memory sized for the T6 Textract OCR fallback
-        // (start job + poll, on top of the S3 read + PDFBox pass), not just the text-layer path.
+        // never exposed via API Gateway. Timeout/memory sized for the T6 vision-model OCR
+        // fallback (PDF page rendering + one OpenRouter HTTP call, itself timed out at 60s
+        // client-side), not just the text-layer path.
         Function extractTextFn = Function.Builder.create(this, "ExtractTextFn")
                 .functionName("leaselens-extract-text")
                 .runtime(Runtime.JAVA_21)
                 .handler("com.leaselens.ExtractTextHandler::handleRequest")
                 .code(Code.fromAsset("../functions/extract-text/target/extract-text.jar"))
-                .memorySize(1024)
-                .timeout(Duration.seconds(60))
+                .memorySize(1536)
+                .timeout(Duration.seconds(90))
                 .environment(Map.of(
-                        "BUCKET_NAME", storageStack.getContractUploadsBucket().getBucketName()
+                        "BUCKET_NAME", storageStack.getContractUploadsBucket().getBucketName(),
+                        // Shares analyze-contract's DynamoDB table: OcrTextCache stores OCR'd
+                        // text keyed by the S3 object's own ETag (an "ocr#"-prefixed partition
+                        // key, distinguished from analyze-contract's raw content-hash keys) so a
+                        // retry of the exact same upload reuses the same transcription instead
+                        // of risking a different one from the non-deterministic vision model.
+                        "TABLE_NAME", storageStack.getAnalysesTable().getTableName(),
+                        // Secret (SecureString) — fetched at runtime via SSM SDK, never in plain env vars.
+                        "OPENROUTER_API_KEY_PARAM", OPENROUTER_API_KEY_PARAM,
+                        // Model config (String) — fetched at runtime so it's changeable without redeploy.
+                        "OPENROUTER_VISION_MODEL_PARAM", OPENROUTER_VISION_MODEL_PARAM
                 ))
                 .build();
 
         storageStack.getContractUploadsBucket().grantRead(extractTextFn);
+        storageStack.getAnalysesTable().grantReadWriteData(extractTextFn);
 
-        // T6: extract-text needs to start/poll Textract's async text-detection job. Textract
-        // doesn't support resource-level restriction on these actions, hence "*".
+        // T6: extract-text's OCR fallback (OpenRouterVisionClient) needs to read the OpenRouter
+        // API key and vision-model config from SSM — same grant shape as analyze-contract below.
+        // No Textract IAM here: Textract has no regional endpoint in sa-east-1, where this stack
+        // is deployed, so OCR goes through OpenRouter's vision models instead of an AWS OCR
+        // service (see the plan doc's T6 status note for the full rationale).
+        String extractTextSsmBase = "arn:aws:ssm:" + getRegion() + ":" + getAccount() + ":parameter";
         extractTextFn.addToRolePolicy(PolicyStatement.Builder.create()
-                .actions(List.of("textract:StartDocumentTextDetection", "textract:GetDocumentTextDetection"))
-                .resources(List.of("*"))
+                .actions(List.of("ssm:GetParameter"))
+                .resources(List.of(
+                        extractTextSsmBase + OPENROUTER_API_KEY_PARAM,
+                        extractTextSsmBase + OPENROUTER_VISION_MODEL_PARAM
+                ))
+                .build());
+        extractTextFn.addToRolePolicy(PolicyStatement.Builder.create()
+                .actions(List.of("kms:Decrypt", "kms:GenerateDataKey"))
+                .resources(List.of("arn:aws:kms:" + getRegion() + ":" + getAccount() + ":alias/aws/ssm"))
                 .build());
 
         // Lambda: generate-upload-url — public entry point for browsers to get a presigned S3
@@ -82,7 +113,10 @@ public class LeaseLensApiStack extends Stack {
                 .handler("com.leaselens.AnalyzeContractHandler::handleRequest")
                 .code(Code.fromAsset("../functions/analyze-contract/target/analyze-contract.jar"))
                 .memorySize(512)
-                .timeout(Duration.seconds(120))
+                // Covers a full scanned-contract chain: Lambda-to-Lambda call to extract-text
+                // (up to its own 90s timeout for the T6 vision-OCR fallback) plus this Lambda's
+                // own OpenRouter analysis call (client-side timeout 60s), with headroom.
+                .timeout(Duration.seconds(180))
                 .environment(Map.of(
                         "TABLE_NAME", storageStack.getAnalysesTable().getTableName(),
                         "EXTRACT_TEXT_FUNCTION_NAME", extractTextFn.getFunctionName(),
