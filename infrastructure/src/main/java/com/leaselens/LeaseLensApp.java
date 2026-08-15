@@ -22,7 +22,7 @@ public class LeaseLensApp {
 
         LeaseLensStorageStack storageStack = new LeaseLensStorageStack(app, "LeaseLensStorageStack", props);
         new LeaseLensApiStack(app, "LeaseLensApiStack", props, storageStack);
-        // new LeaseLensFrontendStack(app, "LeaseLensFrontendStack", props); // T11, not built yet
+        new LeaseLensFrontendStack(app, "LeaseLensFrontendStack", props);
 
         app.synth();
     }

@@ -1,8 +1,8 @@
 # Deployment
 
-Status as of T4/T6/T10: infrastructure code exists and synthesizes locally (`cdk synth`);
-nothing has been deployed to AWS yet. This doc covers what deploying will look like once we
-decide to ship.
+Status as of T11: all three stacks (`LeaseLensStorageStack`, `LeaseLensApiStack`,
+`LeaseLensFrontendStack`) are deployed and live in `sa-east-1`. This doc covers the deploy
+recipe end to end.
 
 ## Prerequisites
 
@@ -55,13 +55,32 @@ region problem entirely instead of requiring a cross-region workaround.
 cd infrastructure
 JAVA_HOME=/path/to/jdk21 npx aws-cdk@2.130.0 deploy LeaseLensStorageStack
 JAVA_HOME=/path/to/jdk21 npx aws-cdk@2.130.0 deploy LeaseLensApiStack
+JAVA_HOME=/path/to/jdk21 npx aws-cdk@2.130.0 deploy LeaseLensFrontendStack
 ```
+
+### Frontend (T11): build + sync before/after deploying the stack
+
+`LeaseLensFrontendStack` only creates the S3 bucket + CloudFront distribution — it does **not**
+upload the built site. CDK's `BucketDeployment` construct is deliberately not used: on this
+project's pinned CDK version (2.130.0), its bundled AWS-CLI Lambda layer fails every time with
+`TypeError: unsupported operand type(s) for |: 'type' and 'type'` (a Python 3.9-runtime-vs-newer-
+botocore version-skew bug in that old CDK release's shared layer, confirmed live via the custom
+resource's CloudWatch logs — not something fixable in our own code short of upgrading CDK).
+Sync manually instead, after both `npm run build` and the CDK deploy:
+
+```sh
+cd frontend
+VITE_API_BASE_URL=https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod npm run build
+aws s3 sync dist/ s3://<FrontendBucketName from stack output> --delete
+aws cloudfront create-invalidation --distribution-id <FrontendDistributionId from stack output> --paths "/*"
+```
+
+The stack outputs `FrontendBucketName`, `FrontendDistributionId`, and `FrontendUrl` — re-run the
+sync + invalidation any time the frontend changes; the CDK deploy itself only needs re-running if
+the bucket/distribution configuration changes.
 
 ## What's NOT wired yet
 
-- **Frontend hosting (T11)** — no CloudFront/S3 static site stack yet. The PWA (T10) has to be
-  run locally (`cd frontend && npm run dev`) pointed at the deployed API via `VITE_API_BASE_URL`
-  until T11 lands.
 - **Cost/abuse/privacy guards (T13)** — no API Gateway throttling; `generate-upload-url`'s max
   file size check is a client-declared `fileSizeBytes` soft check only (see its Javadoc) — a
   presigned PUT can't enforce an upload's actual byte count the way a presigned POST policy can.
