@@ -25,8 +25,14 @@ public class GenerateUploadUrlHandler implements
      * Client-declared max upload size. This is a best-effort, application-level check on the
      * {@code fileSizeBytes} the caller reports before we hand out a URL — a presigned PUT
      * (unlike a presigned POST policy) has no built-in way to bound the actual byte count of
-     * what gets uploaded through it. Hard enforcement (reject/expire oversized objects
-     * server-side) is T13's job; this is the "soft" cap anticipated by T4's deliverable.
+     * what gets uploaded through it: {@code s3:content-length-range} is a presigned-POST-only
+     * policy condition, not enforceable via bucket/IAM policy on a SigV4-presigned PUT (verified
+     * against AWS docs while building T13's guards). Real hard enforcement therefore can't live
+     * here or in a bucket policy — it's done downstream instead, where it also matters more:
+     * {@code ExtractTextHandler.MAX_OBJECT_SIZE_BYTES} rejects an oversized object before ever
+     * parsing it or spending OCR/LLM cost on it, which is the actual risk this guard exists to
+     * bound. This client-declared check just avoids handing out a URL at all for an
+     * obviously-oversized file when the client is honest about its size.
      */
     static final long MAX_UPLOAD_SIZE_BYTES = 10L * 1024 * 1024;
 

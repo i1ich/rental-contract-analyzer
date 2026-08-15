@@ -154,6 +154,16 @@ public class LeaseLensApiStack extends Stack {
                         .allowMethods(List.of("POST", "OPTIONS"))
                         .allowHeaders(List.of("Content-Type"))
                         .build())
+                // T13 abuse guard: caps request rate across the whole API (both routes share
+                // this account-wide-per-stage limit, since there's no auth to throttle per-user
+                // by). Sized well above any real single user's usage, but low enough to blunt a
+                // scripted flood that would otherwise run up OpenRouter/Lambda cost. 5 req/s
+                // sustained, bursts up to 10 -- generous for the "one person, one contract"
+                // anonymous-tool usage pattern this product targets.
+                .deployOptions(StageOptions.builder()
+                        .throttlingRateLimit(5)
+                        .throttlingBurstLimit(10)
+                        .build())
                 .build();
 
         Resource uploadUrlResource = api.getRoot().addResource("upload-url");

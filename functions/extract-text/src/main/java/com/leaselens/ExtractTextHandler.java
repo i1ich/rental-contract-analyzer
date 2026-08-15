@@ -32,6 +32,27 @@ import java.util.Map;
  */
 public class ExtractTextHandler implements RequestHandler<Map<String, Object>, Map<String, Object>> {
 
+    /**
+     * T13 cost/abuse guard: rejects processing (PDFBox parse, and especially the far more
+     * expensive vision-OCR/LLM calls) for objects over this size, regardless of what
+     * {@code generate-upload-url}'s client-declared {@code fileSizeBytes} soft check let
+     * through — a presigned S3 PUT has no signature-level way to bound the actual uploaded byte
+     * count (confirmed: {@code s3:content-length-range} is a presigned-POST-only condition, not
+     * available for PUT), so this is the real enforcement point. Mirrors
+     * {@code GenerateUploadUrlHandler.MAX_UPLOAD_SIZE_BYTES} (10 MB) — kept in sync manually
+     * since the two are independent Maven modules.
+     */
+    static final long MAX_OBJECT_SIZE_BYTES = 10L * 1024 * 1024;
+
+    /**
+     * T13 cost/abuse guard: caps how many pages get rendered and sent to the vision-OCR model.
+     * Each page is one image in the transcription payload, so page count is the main cost/abuse
+     * lever for a scanned document (a text-layer PDF is bounded separately, by
+     * {@code AnalyzeContractHandler.MAX_CONTRACT_TEXT_LENGTH}). A real rental contract is
+     * typically well under 15 pages even with attachments; this leaves generous headroom.
+     */
+    static final int MAX_OCR_PAGES = 20;
+
     private final String bucketName = System.getenv("BUCKET_NAME");
     private final S3Client s3Client;
     private final VisionTranscriptionClient visionClient;
@@ -62,11 +83,23 @@ public class ExtractTextHandler implements RequestHandler<Map<String, Object>, M
         }
 
         ResponseBytes<GetObjectResponse> object = readObject(objectKey);
+
+        Long contentLength = object.response().contentLength();
+        if (contentLength != null && contentLength > MAX_OBJECT_SIZE_BYTES) {
+            System.err.println("Rejected object over the size guard [bytes=" + contentLength + "]");
+            return toResponse("", 0, false, "too-large");
+        }
+
         byte[] pdfBytes = object.asByteArray();
         PdfTextExtractor.ExtractionResult result = PdfTextExtractor.extract(pdfBytes);
 
         if (result.hasTextLayer()) {
             return toResponse(result.text(), result.pageCount(), true, result.source());
+        }
+
+        if (result.pageCount() > MAX_OCR_PAGES) {
+            System.err.println("Rejected scanned document over the OCR page guard [pages=" + result.pageCount() + "]");
+            return toResponse("", result.pageCount(), false, "too-many-pages");
         }
 
         // No native text layer — check whether we've already OCR'd this exact object before

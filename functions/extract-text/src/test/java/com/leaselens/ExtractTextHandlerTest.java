@@ -158,6 +158,37 @@ class ExtractTextHandlerTest {
         assertEquals(1, visionB.callCount());
     }
 
+    @Test
+    void objectOverTheSizeGuardIsRejectedBeforeParsingOrCallingVision() {
+        FakeS3Client s3 = new FakeS3Client();
+        // Small actual bytes, but a declared Content-Length over the guard -- exercises the
+        // rejection without allocating a real 10MB+ array in the test.
+        s3.putObjectWithDeclaredSize("uploads/huge.pdf", new byte[]{1, 2, 3},
+                ExtractTextHandler.MAX_OBJECT_SIZE_BYTES + 1);
+        FakeVisionTranscriptionClient vision = FakeVisionTranscriptionClient.returning("should never be called");
+        ExtractTextHandler handler = new ExtractTextHandler(s3, vision, newCache());
+
+        Map<String, Object> response = handler.handleRequest(Map.of("objectKey", "uploads/huge.pdf"), null);
+
+        assertEquals("too-large", response.get("source"));
+        assertEquals("", response.get("text"));
+        assertEquals(0, vision.callCount());
+    }
+
+    @Test
+    void scannedDocumentOverTheOcrPageGuardIsRejectedWithoutCallingVision() throws IOException {
+        FakeS3Client s3 = new FakeS3Client();
+        s3.putObject("uploads/toolong.pdf", buildBlankPdf(ExtractTextHandler.MAX_OCR_PAGES + 1));
+        FakeVisionTranscriptionClient vision = FakeVisionTranscriptionClient.returning("should never be called");
+        ExtractTextHandler handler = new ExtractTextHandler(s3, vision, newCache());
+
+        Map<String, Object> response = handler.handleRequest(Map.of("objectKey", "uploads/toolong.pdf"), null);
+
+        assertEquals("too-many-pages", response.get("source"));
+        assertEquals("", response.get("text"));
+        assertEquals(0, vision.callCount());
+    }
+
     private static OcrTextCache newCache() {
         return new OcrTextCache(new FakeDynamoDbClient(), "leaselens-analyses-test");
     }

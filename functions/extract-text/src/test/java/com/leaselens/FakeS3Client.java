@@ -17,7 +17,7 @@ import java.util.Map;
  */
 public class FakeS3Client implements S3Client {
 
-    private record Stored(byte[] bytes, String eTag) {
+    private record Stored(byte[] bytes, String eTag, long declaredContentLength) {
     }
 
     private final Map<String, Stored> objects = new HashMap<>();
@@ -29,7 +29,16 @@ public class FakeS3Client implements S3Client {
 
     /** Stores an object with an explicit ETag, for tests that need precise control over it. */
     public void putObject(String key, byte[] bytes, String eTag) {
-        objects.put(key, new Stored(bytes, eTag));
+        objects.put(key, new Stored(bytes, eTag, bytes.length));
+    }
+
+    /**
+     * Stores an object whose reported {@code Content-Length} differs from its actual byte count
+     * — lets a test exercise {@code ExtractTextHandler}'s size guard without allocating a real
+     * multi-megabyte array.
+     */
+    public void putObjectWithDeclaredSize(String key, byte[] bytes, long declaredContentLength) {
+        objects.put(key, new Stored(bytes, "\"" + Integer.toHexString(Arrays.hashCode(bytes)) + "\"", declaredContentLength));
     }
 
     @Override
@@ -39,7 +48,8 @@ public class FakeS3Client implements S3Client {
             throw NoSuchKeyException.builder().message("No such key: " + getObjectRequest.key()).build();
         }
         return ResponseBytes.fromByteArray(
-                GetObjectResponse.builder().eTag(stored.eTag()).build(), stored.bytes());
+                GetObjectResponse.builder().eTag(stored.eTag()).contentLength(stored.declaredContentLength()).build(),
+                stored.bytes());
     }
 
     @Override

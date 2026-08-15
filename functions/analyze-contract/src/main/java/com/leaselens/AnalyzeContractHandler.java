@@ -46,6 +46,14 @@ public class AnalyzeContractHandler implements
     // friendly message rather than sending near-empty input to the LLM.
     private static final int MIN_CONTRACT_TEXT_LENGTH = 200;
 
+    // T13 cost/abuse guard: caps LLM input size regardless of source. A real Uruguayan rental
+    // contract with this checklist is a few thousand words; 60,000 chars (~15K tokens) leaves
+    // generous headroom for a long contract with attachments while bounding the worst case of a
+    // pathological/malicious upload (e.g. a text-layer PDF stuffed with megabytes of embedded
+    // text) from blowing up OpenRouter cost. extract-text's own MAX_OCR_PAGES guard covers the
+    // scanned-document side of this same concern.
+    private static final int MAX_CONTRACT_TEXT_LENGTH = 60_000;
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final String tableName;
@@ -90,6 +98,11 @@ public class AnalyzeContractHandler implements
                         "No pudimos extraer suficiente texto de este documento (incluso probando "
                                 + "reconocimiento óptico para escaneos). Verificá que sea un contrato "
                                 + "de alquiler en formato PDF legible."));
+            }
+            if (contractText.length() > MAX_CONTRACT_TEXT_LENGTH) {
+                // Never log the truncated-off content itself — just the fact and the length.
+                System.err.println("Truncating oversized contract text [originalLength=" + contractText.length() + "]");
+                contractText = contractText.substring(0, MAX_CONTRACT_TEXT_LENGTH);
             }
 
             String contentHash = sha256Hex(contractText);
