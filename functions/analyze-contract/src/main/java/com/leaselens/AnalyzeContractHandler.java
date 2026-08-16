@@ -5,119 +5,63 @@ import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyRequestEvent;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyResponseEvent;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.leaselens.model.AnalysisResult;
 import com.leaselens.model.AnalyzeContractRequest;
-import com.leaselens.service.OpenRouterAnalysisService;
-import com.leaselens.service.ContractAnalysisService;
-import com.leaselens.service.ExtractTextInvoker;
-import com.leaselens.service.ExtractTextResult;
-import com.leaselens.service.LambdaExtractTextInvoker;
+import com.leaselens.service.AnalysisJobStore;
+import com.leaselens.service.AnalysisWorkerInvoker;
+import com.leaselens.service.LambdaAnalysisWorkerInvoker;
 import com.leaselens.service.ServiceException;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
-import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
-import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
-import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
-import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 
 /**
- * Orchestration handler for contract analysis: fetch extracted text (via the extract-text
- * Lambda), analyze it with an LLM, cache the structured result in DynamoDB keyed by a hash of
- * the contract *text* (not the S3 object key, and not the raw document itself — per the
- * product's privacy design, identical contract text uploaded under any S3 key should hit the
- * same cache entry, and we never persist the raw PDF or its text in DynamoDB, only the
- * structured analysis result).
+ * The public HTTP face of contract analysis. Handles both halves of the asynchronous flow:
+ *
+ * <ul>
+ *   <li>{@code POST /analyze} — accepts an {@code objectKey}, registers a job, kicks off
+ *       {@link AnalyzeWorkerHandler} in the background and returns {@code 202} with a
+ *       {@code jobId} in milliseconds.</li>
+ *   <li>{@code GET /analyze/{jobId}} — reports {@code pending}, the finished analysis, or the
+ *       recorded failure.</li>
+ * </ul>
+ *
+ * <p>This endpoint used to do the analysis inline and return the result. It could not: API
+ * Gateway caps a REST integration at a hard, unconfigurable 29 seconds and a real analysis takes
+ * ~83-92s on the model that passes the T12 quality gate, so every cache-miss request returned 504
+ * to the user while the Lambda quietly finished and cached the result. That is not a model-choice
+ * problem — the fastest quality-tested candidate still needed ~30-39s — so the request path itself
+ * had to stop waiting. See the plan doc's T16 status note.
+ *
+ * <p>Both routes are served by one Lambda rather than two so a polling client keeps hitting the
+ * same warm execution environment instead of paying a Java cold start on each poll.
  */
 public class AnalyzeContractHandler implements
         RequestHandler<APIGatewayProxyRequestEvent, APIGatewayProxyResponseEvent> {
 
-    // Analyses are reusable (the same contract text always yields the same analysis) rather
-    // than time-sensitive like a photo listing, so we cache them for a relatively long window.
-    private static final int RESULTS_CACHE_TTL_DAYS = 30;
-
-    // Below this length, extracted text is very unlikely to be an actual rental contract
-    // (e.g. a mostly-blank page or an unrelated short document) — bail out early with a
-    // friendly message rather than sending near-empty input to the LLM.
-    private static final int MIN_CONTRACT_TEXT_LENGTH = 200;
-
-    // T13 cost/abuse guard: caps LLM input size regardless of source. A real Uruguayan rental
-    // contract with this checklist is a few thousand words; 60,000 chars (~15K tokens) leaves
-    // generous headroom for a long contract with attachments while bounding the worst case of a
-    // pathological/malicious upload (e.g. a text-layer PDF stuffed with megabytes of embedded
-    // text) from blowing up OpenRouter cost. extract-text's own MAX_OCR_PAGES guard covers the
-    // scanned-document side of this same concern.
-    private static final int MAX_CONTRACT_TEXT_LENGTH = 60_000;
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private final String tableName;
-    private final ExtractTextInvoker extractTextInvoker;
-    private final DynamoDbClient dynamoDb;
-    private final ContractAnalysisService analysisService;
+    private final AnalysisJobStore jobStore;
+    private final AnalysisWorkerInvoker workerInvoker;
 
     /** No-arg constructor used by the Lambda runtime: wires up real AWS clients. */
     public AnalyzeContractHandler() {
-        this(new LambdaExtractTextInvoker(), DynamoDbClient.create(), new OpenRouterAnalysisService());
+        this(DynamoDbClient.create(), new LambdaAnalysisWorkerInvoker());
     }
 
-    /** Package-private constructor for tests: allows injecting fakes/mocks for all AWS-touching seams. */
-    AnalyzeContractHandler(ExtractTextInvoker extractTextInvoker,
-                            DynamoDbClient dynamoDb,
-                            ContractAnalysisService analysisService) {
-        this.tableName = System.getenv("TABLE_NAME");
-        this.extractTextInvoker = extractTextInvoker;
-        this.dynamoDb = dynamoDb;
-        this.analysisService = analysisService;
+    /** Package-private constructor for tests: allows injecting fakes for all AWS-touching seams. */
+    AnalyzeContractHandler(DynamoDbClient dynamoDb, AnalysisWorkerInvoker workerInvoker) {
+        this.jobStore = new AnalysisJobStore(dynamoDb, System.getenv("TABLE_NAME"));
+        this.workerInvoker = workerInvoker;
     }
 
     @Override
     public APIGatewayProxyResponseEvent handleRequest(APIGatewayProxyRequestEvent event, Context context) {
         try {
-            AnalyzeContractRequest request = parseRequest(event);
-            if (request.getObjectKey() == null || request.getObjectKey().isBlank()) {
-                return jsonResponse(400, Map.of("error", "objectKey is required"));
-            }
-
-            String objectKey = request.getObjectKey().trim();
-
-            // extract-text already falls back to Textract OCR (T6) when there's no native text
-            // layer, so "text too short" is the single signal here for "couldn't get usable
-            // text" — whether that's because it's not a contract, a blank page, or OCR came up
-            // empty on a low-quality scan.
-            ExtractTextResult extracted = extractTextInvoker.extractText(objectKey);
-
-            String contractText = extracted.getText() == null ? "" : extracted.getText().trim();
-            if (contractText.length() < MIN_CONTRACT_TEXT_LENGTH) {
-                return jsonResponse(422, Map.of("error",
-                        "No pudimos extraer suficiente texto de este documento (incluso probando "
-                                + "reconocimiento óptico para escaneos). Verificá que sea un contrato "
-                                + "de alquiler en formato PDF legible."));
-            }
-            if (contractText.length() > MAX_CONTRACT_TEXT_LENGTH) {
-                // Never log the truncated-off content itself — just the fact and the length.
-                System.err.println("Truncating oversized contract text [originalLength=" + contractText.length() + "]");
-                contractText = contractText.substring(0, MAX_CONTRACT_TEXT_LENGTH);
-            }
-
-            String contentHash = sha256Hex(contractText);
-
-            AnalysisResult cached = loadFromCache(contentHash);
-            if (cached != null) {
-                return jsonResponse(200, cached);
-            }
-
-            AnalysisResult result = analysisService.analyze(contractText);
-            result.setCachedAt(null);
-
-            saveToCache(contentHash, result);
-
-            return jsonResponse(200, result);
+            String method = event == null || event.getHttpMethod() == null
+                    ? "POST" : event.getHttpMethod().toUpperCase();
+            return "GET".equals(method) ? getJobStatus(event) : startJob(event);
         } catch (ServiceException e) {
             return jsonResponse(502, Map.of("error", e.getMessage()));
         } catch (IllegalArgumentException e) {
@@ -130,8 +74,65 @@ public class AnalyzeContractHandler implements
         }
     }
 
+    /** {@code POST /analyze} — register the job, start the worker, answer immediately. */
+    private APIGatewayProxyResponseEvent startJob(APIGatewayProxyRequestEvent event) {
+        AnalyzeContractRequest request = parseRequest(event);
+        if (request.getObjectKey() == null || request.getObjectKey().isBlank()) {
+            return jsonResponse(400, Map.of("error", "objectKey is required"));
+        }
+
+        String jobId = UUID.randomUUID().toString();
+        // Written before the invoke so a status poll that races ahead of the worker finds PENDING
+        // rather than a 404 that the client would reasonably read as "this job never existed".
+        jobStore.createPending(jobId);
+        workerInvoker.startAnalysis(jobId, request.getObjectKey().trim());
+
+        return jsonResponse(202, Map.of("jobId", jobId, "status", "pending"));
+    }
+
+    /** {@code GET /analyze/{jobId}} — report progress, the result, or the recorded failure. */
+    private APIGatewayProxyResponseEvent getJobStatus(APIGatewayProxyRequestEvent event) {
+        Map<String, String> pathParams = event.getPathParameters();
+        String jobId = pathParams == null ? null : pathParams.get("jobId");
+        if (jobId == null || jobId.isBlank()) {
+            return jsonResponse(400, Map.of("error", "jobId is required"));
+        }
+
+        AnalysisJobStore.Job job = jobStore.get(jobId);
+        if (job == null) {
+            return jsonResponse(404, Map.of("error",
+                    "No encontramos este análisis. Puede haber expirado — probá subir el contrato de nuevo."));
+        }
+
+        return switch (job.status()) {
+            case PENDING -> jsonResponse(200, Map.of("status", "pending"));
+            case FAILED -> jsonResponse(200, Map.of(
+                    "status", "error",
+                    // The HTTP status the old synchronous endpoint would have returned, carried in
+                    // the body rather than as the response status: the poll itself succeeded, so a
+                    // 4xx/5xx here would conflate "the analysis failed" with "the poll failed".
+                    "errorStatusCode", job.errorStatusCode() > 0 ? job.errorStatusCode() : 500,
+                    "error", job.errorMessage() == null ? "Error interno del servidor" : job.errorMessage()));
+            case DONE -> doneResponse(job);
+        };
+    }
+
+    private APIGatewayProxyResponseEvent doneResponse(AnalysisJobStore.Job job) {
+        if (job.resultJson() == null || job.resultJson().isBlank()) {
+            return jsonResponse(500, Map.of("error", "Error interno del servidor"));
+        }
+        // The stored result is already-serialized JSON; splice it in as a raw value rather than
+        // deserializing to AnalysisResult and back, which would be pure overhead and one more
+        // place for the shape to drift.
+        String body = "{\"status\":\"done\",\"result\":" + job.resultJson() + "}";
+        return new APIGatewayProxyResponseEvent()
+                .withStatusCode(200)
+                .withHeaders(corsHeaders())
+                .withBody(body);
+    }
+
     private AnalyzeContractRequest parseRequest(APIGatewayProxyRequestEvent event) {
-        String body = event.getBody();
+        String body = event == null ? null : event.getBody();
         if (body == null || body.isBlank()) {
             throw new IllegalArgumentException("Request body is required");
         }
@@ -142,81 +143,18 @@ public class AnalyzeContractHandler implements
         }
     }
 
-    private AnalysisResult loadFromCache(String contentHash) {
-        if (tableName == null || tableName.isBlank()) {
-            throw new IllegalStateException("TABLE_NAME environment variable is not set");
-        }
-
-        var item = dynamoDb.getItem(GetItemRequest.builder()
-                        .tableName(tableName)
-                        .key(Map.of("contentHash", AttributeValue.builder().s(contentHash).build()))
-                        .build())
-                .item();
-
-        if (item == null || item.isEmpty()) {
-            return null;
-        }
-
-        AttributeValue ttlAttr = item.get("ttl");
-        AttributeValue resultAttr = item.get("resultJson");
-        if (ttlAttr == null || resultAttr == null || resultAttr.s() == null) {
-            return null;
-        }
-
-        long ttlEpoch = Long.parseLong(ttlAttr.n());
-        if (ttlEpoch <= Instant.now().getEpochSecond()) {
-            return null;
-        }
-
-        try {
-            AnalysisResult result = MAPPER.readValue(resultAttr.s(), AnalysisResult.class);
-            result.setCachedAt(Instant.now().toString());
-            return result;
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to deserialize cached result", e);
-        }
-    }
-
-    private void saveToCache(String contentHash, AnalysisResult result) {
-        if (tableName == null || tableName.isBlank()) {
-            throw new IllegalStateException("TABLE_NAME environment variable is not set");
-        }
-
-        String resultJson;
-        try {
-            resultJson = MAPPER.writeValueAsString(result);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to serialize analysis result", e);
-        }
-
-        long ttlEpoch = Instant.now().plus(RESULTS_CACHE_TTL_DAYS, ChronoUnit.DAYS).getEpochSecond();
-
-        dynamoDb.putItem(PutItemRequest.builder()
-                .tableName(tableName)
-                .item(Map.of(
-                        "contentHash", AttributeValue.builder().s(contentHash).build(),
-                        "ttl", AttributeValue.builder().n(String.valueOf(ttlEpoch)).build(),
-                        "resultJson", AttributeValue.builder().s(resultJson).build()))
-                .build());
-    }
-
-    private static String sha256Hex(String input) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(input.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 not available", e);
-        }
+    private static Map<String, String> corsHeaders() {
+        Map<String, String> headers = new LinkedHashMap<>();
+        headers.put("Content-Type", "application/json");
+        headers.put("Access-Control-Allow-Origin", "*");
+        return headers;
     }
 
     private APIGatewayProxyResponseEvent jsonResponse(int statusCode, Object body) {
         try {
             return new APIGatewayProxyResponseEvent()
                     .withStatusCode(statusCode)
-                    .withHeaders(Map.of(
-                            "Content-Type", "application/json",
-                            "Access-Control-Allow-Origin", "*"))
+                    .withHeaders(corsHeaders())
                     .withBody(MAPPER.writeValueAsString(body));
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize response", e);

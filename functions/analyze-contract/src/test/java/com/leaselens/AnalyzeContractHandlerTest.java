@@ -4,160 +4,157 @@ import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyRequestEvent;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyResponseEvent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.junit.jupiter.api.BeforeAll;
+import com.leaselens.service.AnalysisJobStore;
+import com.leaselens.service.AnalysisWorkerInvoker;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Exercises AnalyzeContractHandler end-to-end (parsing, extract-text seam, cache-miss path,
- * response shape) using fakes for every AWS-touching dependency, so it runs fully offline.
- *
- * These fixtures are fictional test data (see disclaimer header in each fixture file) — not
- * real contracts and not the T2/T7 golden set.
+ * Exercises the public HTTP surface of the asynchronous analysis flow: accepting a job, and the
+ * three states a status poll can report. The analysis pipeline itself is covered by
+ * {@code AnalyzeWorkerHandlerTest} — this handler deliberately does none of that work.
  */
 class AnalyzeContractHandlerTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static String fixture01;
-    private static String fixture02;
+    private static final String TABLE = "leaselens-analyses-test";
 
-    @BeforeAll
-    static void loadFixtures() throws IOException {
-        fixture01 = readFixture("fixture-01-deposito-abusivo.txt");
-        fixture02 = readFixture("fixture-02-renovacion-automatica.txt");
-    }
+    /** Records what the handler asked for without running any analysis. */
+    private static class RecordingWorkerInvoker implements AnalysisWorkerInvoker {
+        final List<String> startedJobIds = new ArrayList<>();
+        final List<String> startedObjectKeys = new ArrayList<>();
 
-    private static String readFixture(String name) throws IOException {
-        Path path = Path.of("src/test/resources/golden-set-mock", name);
-        return Files.readString(path);
-    }
-
-    @Test
-    void returns200WithNonEmptyFindingsAndVerbatimQuotes_fixture01() throws Exception {
-        assertHandlerProducesValidAnalysis("contracts/fixture-01.pdf", fixture01);
-    }
-
-    @Test
-    void returns200WithNonEmptyFindingsAndVerbatimQuotes_fixture02() throws Exception {
-        assertHandlerProducesValidAnalysis("contracts/fixture-02.pdf", fixture02);
-    }
-
-    private void assertHandlerProducesValidAnalysis(String objectKey, String fixtureText) throws Exception {
-        AnalyzeContractHandler handler = new AnalyzeContractHandler(
-                new FakeExtractTextInvoker(Map.of(objectKey, fixtureText)),
-                new FakeDynamoDbClient(),
-                new MockContractAnalysisService());
-
-        APIGatewayProxyRequestEvent event = new APIGatewayProxyRequestEvent();
-        event.setBody(MAPPER.writeValueAsString(Map.of("objectKey", objectKey)));
-
-        APIGatewayProxyResponseEvent response = handler.handleRequest(event, null);
-
-        assertEquals(200, response.getStatusCode());
-
-        JsonNode body = MAPPER.readTree(response.getBody());
-        assertTrue(body.has("summary"));
-        assertTrue(body.has("findings"));
-        assertTrue(body.get("findings").isArray());
-        assertFalse(body.get("findings").isEmpty(), "findings should be non-empty");
-
-        for (JsonNode finding : body.get("findings")) {
-            String clauseQuote = finding.get("clauseQuote").asText();
-            assertTrue(fixtureText.contains(clauseQuote),
-                    "clauseQuote must be a verbatim substring of the fixture text: " + clauseQuote);
+        @Override
+        public void startAnalysis(String jobId, String objectKey) {
+            startedJobIds.add(jobId);
+            startedObjectKeys.add(objectKey);
         }
     }
 
-    @Test
-    void cacheHitOnSecondCallSkipsAnalysisServiceAndPopulatesCachedAt() throws Exception {
-        String objectKey = "contracts/fixture-01.pdf";
-        FakeDynamoDbClient sharedCache = new FakeDynamoDbClient();
-
-        AnalyzeContractHandler handler1 = new AnalyzeContractHandler(
-                new FakeExtractTextInvoker(Map.of(objectKey, fixture01)),
-                sharedCache,
-                new MockContractAnalysisService());
-
+    private static APIGatewayProxyRequestEvent postWith(String bodyJson) {
         APIGatewayProxyRequestEvent event = new APIGatewayProxyRequestEvent();
-        event.setBody(MAPPER.writeValueAsString(Map.of("objectKey", objectKey)));
+        event.setHttpMethod("POST");
+        event.setBody(bodyJson);
+        return event;
+    }
 
-        APIGatewayProxyResponseEvent first = handler1.handleRequest(event, null);
-        assertEquals(200, first.getStatusCode());
-        JsonNode firstBody = MAPPER.readTree(first.getBody());
-        assertTrue(firstBody.get("cachedAt").isNull());
-
-        // Second call, fresh handler instance sharing the same cache — should be served from cache.
-        AnalyzeContractHandler handler2 = new AnalyzeContractHandler(
-                new FakeExtractTextInvoker(Map.of(objectKey, fixture01)),
-                sharedCache,
-                new MockContractAnalysisService());
-        APIGatewayProxyResponseEvent second = handler2.handleRequest(event, null);
-        assertEquals(200, second.getStatusCode());
-        JsonNode secondBody = MAPPER.readTree(second.getBody());
-        assertFalse(secondBody.get("cachedAt").isNull(), "second call should be served from cache");
+    private static APIGatewayProxyRequestEvent getStatusOf(String jobId) {
+        APIGatewayProxyRequestEvent event = new APIGatewayProxyRequestEvent();
+        event.setHttpMethod("GET");
+        event.setPathParameters(Map.of("jobId", jobId));
+        return event;
     }
 
     @Test
-    void returns422WhenNoTextLayer() throws Exception {
-        String objectKey = "contracts/scanned.pdf";
-        AnalyzeContractHandler handler = new AnalyzeContractHandler(
-                new FakeExtractTextInvoker(Map.of(), false),
-                new FakeDynamoDbClient(),
-                new MockContractAnalysisService());
+    void postAcceptsTheJobAndReturns202WithAJobIdWithoutAnalyzing() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+        AnalyzeContractHandler handler = new AnalyzeContractHandler(db, worker);
 
-        APIGatewayProxyRequestEvent event = new APIGatewayProxyRequestEvent();
-        event.setBody(MAPPER.writeValueAsString(Map.of("objectKey", objectKey)));
+        APIGatewayProxyResponseEvent response = handler.handleRequest(
+                postWith(MAPPER.writeValueAsString(Map.of("objectKey", "contracts/fixture-01.pdf"))), null);
 
-        APIGatewayProxyResponseEvent response = handler.handleRequest(event, null);
-        assertEquals(422, response.getStatusCode());
+        // 202, not 200: the analysis has been accepted, not performed. This is the whole point of
+        // the redesign — a real analysis takes ~83-92s against API Gateway's hard 29s cap.
+        assertEquals(202, response.getStatusCode());
+        JsonNode body = MAPPER.readTree(response.getBody());
+        assertEquals("pending", body.get("status").asText());
+        String jobId = body.get("jobId").asText();
+        assertFalse(jobId.isBlank());
+
+        assertEquals(List.of(jobId), worker.startedJobIds, "the worker must be started for this job");
+        assertEquals(List.of("contracts/fixture-01.pdf"), worker.startedObjectKeys);
+    }
+
+    /**
+     * A client can poll before the worker has done anything, so accepting a job has to leave a
+     * record behind immediately — otherwise the first poll 404s and the client reasonably
+     * concludes the job never existed.
+     */
+    @Test
+    void statusIsPendingImmediatelyAfterAccepting() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        AnalyzeContractHandler handler = new AnalyzeContractHandler(db, new RecordingWorkerInvoker());
+
+        APIGatewayProxyResponseEvent accepted = handler.handleRequest(
+                postWith(MAPPER.writeValueAsString(Map.of("objectKey", "contracts/fixture-01.pdf"))), null);
+        String jobId = MAPPER.readTree(accepted.getBody()).get("jobId").asText();
+
+        APIGatewayProxyResponseEvent status = handler.handleRequest(getStatusOf(jobId), null);
+        assertEquals(200, status.getStatusCode());
+        assertEquals("pending", MAPPER.readTree(status.getBody()).get("status").asText());
     }
 
     @Test
-    void returns422WhenTextTooShort() throws Exception {
-        String objectKey = "contracts/tiny.pdf";
-        AnalyzeContractHandler handler = new AnalyzeContractHandler(
-                new FakeExtractTextInvoker(Map.of(objectKey, "muy corto")),
-                new FakeDynamoDbClient(),
-                new MockContractAnalysisService());
+    void statusReturnsTheResultOnceTheWorkerIsDone() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        new AnalysisJobStore(db, TABLE).markDone("job-1",
+                "{\"summary\":\"resumen\",\"findings\":[],\"cachedAt\":null}");
 
-        APIGatewayProxyRequestEvent event = new APIGatewayProxyRequestEvent();
-        event.setBody(MAPPER.writeValueAsString(Map.of("objectKey", objectKey)));
+        APIGatewayProxyResponseEvent status =
+                new AnalyzeContractHandler(db, new RecordingWorkerInvoker()).handleRequest(getStatusOf("job-1"), null);
 
-        APIGatewayProxyResponseEvent response = handler.handleRequest(event, null);
-        assertEquals(422, response.getStatusCode());
+        assertEquals(200, status.getStatusCode());
+        JsonNode body = MAPPER.readTree(status.getBody());
+        assertEquals("done", body.get("status").asText());
+        assertNotNull(body.get("result"));
+        assertEquals("resumen", body.get("result").get("summary").asText());
+    }
+
+    /**
+     * A failed analysis is a successful poll: the 4xx/5xx the synchronous endpoint would have
+     * returned travels in the body, so the client can tell "the analysis failed" apart from "the
+     * status request failed".
+     */
+    @Test
+    void statusReportsAFailedAnalysisAsA200CarryingTheOriginalStatusCode() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        new AnalysisJobStore(db, TABLE).markFailed("job-1", 422, "No pudimos extraer suficiente texto");
+
+        APIGatewayProxyResponseEvent status =
+                new AnalyzeContractHandler(db, new RecordingWorkerInvoker()).handleRequest(getStatusOf("job-1"), null);
+
+        assertEquals(200, status.getStatusCode());
+        JsonNode body = MAPPER.readTree(status.getBody());
+        assertEquals("error", body.get("status").asText());
+        assertEquals(422, body.get("errorStatusCode").asInt());
+        assertTrue(body.get("error").asText().contains("No pudimos extraer"));
+    }
+
+    @Test
+    void statusReturns404ForAnUnknownJob() {
+        APIGatewayProxyResponseEvent status = new AnalyzeContractHandler(
+                new FakeDynamoDbClient(), new RecordingWorkerInvoker())
+                .handleRequest(getStatusOf("does-not-exist"), null);
+
+        assertEquals(404, status.getStatusCode());
     }
 
     @Test
     void returns400WhenObjectKeyMissing() {
-        AnalyzeContractHandler handler = new AnalyzeContractHandler(
-                new FakeExtractTextInvoker(Map.of()),
-                new FakeDynamoDbClient(),
-                new MockContractAnalysisService());
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+        APIGatewayProxyResponseEvent response =
+                new AnalyzeContractHandler(new FakeDynamoDbClient(), worker).handleRequest(postWith("{}"), null);
 
-        APIGatewayProxyRequestEvent event = new APIGatewayProxyRequestEvent();
-        event.setBody("{}");
-
-        APIGatewayProxyResponseEvent response = handler.handleRequest(event, null);
         assertEquals(400, response.getStatusCode());
+        assertTrue(worker.startedJobIds.isEmpty(), "no worker should be started for an invalid request");
     }
 
     @Test
     void returns400WhenBodyMissing() {
-        AnalyzeContractHandler handler = new AnalyzeContractHandler(
-                new FakeExtractTextInvoker(Map.of()),
-                new FakeDynamoDbClient(),
-                new MockContractAnalysisService());
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+        APIGatewayProxyResponseEvent response =
+                new AnalyzeContractHandler(new FakeDynamoDbClient(), worker).handleRequest(postWith(null), null);
 
-        APIGatewayProxyRequestEvent event = new APIGatewayProxyRequestEvent();
-        APIGatewayProxyResponseEvent response = handler.handleRequest(event, null);
         assertEquals(400, response.getStatusCode());
+        assertTrue(worker.startedJobIds.isEmpty(), "no worker should be started for an invalid request");
     }
 }

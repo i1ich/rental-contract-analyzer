@@ -116,6 +116,12 @@
   margin: 0.75rem 0 0;
 }
 
+.status-panel__hint {
+  font-size: 0.875rem;
+  color: #6b7280 !important;
+  margin-top: 0.35rem !important;
+}
+
 .status-panel--error p {
   color: #dc2626;
   margin-bottom: 1rem;

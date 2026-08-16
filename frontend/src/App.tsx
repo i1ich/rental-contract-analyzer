@@ -3,7 +3,7 @@ import UploadZone from './components/UploadZone'
 import ResultsView from './components/ResultsView'
 import Disclaimer from './components/Disclaimer'
 import TransferConsent from './components/TransferConsent'
-import { ApiError, analyzeContract, requestUploadUrl, uploadFile } from './api'
+import { ApiError, requestUploadUrl, startAnalysis, uploadFile, waitForAnalysis } from './api'
 import type { AnalysisResult } from './types'
 import { MOCK_ANALYSIS_RESULT } from './mockData'
 import './App.css'
@@ -34,7 +34,10 @@ export default function App() {
       await uploadFile(uploadUrl, requiredContentType, file)
 
       setStage('analyzing')
-      const analysis = await analyzeContract(objectKey)
+      // Two steps rather than one: the API accepts the job and hands back an id, and the result
+      // is collected by polling. See api.ts — a real analysis outlives API Gateway's 29s cap.
+      const jobId = await startAnalysis(objectKey)
+      const analysis = await waitForAnalysis(jobId)
 
       setResult(analysis)
       setStage('done')
@@ -71,7 +74,19 @@ export default function App() {
       {(stage === 'uploading' || stage === 'analyzing') && (
         <div className="status-panel" role="status" aria-live="polite">
           <div className="spinner" aria-hidden="true" />
-          <p>{stage === 'uploading' ? 'Subiendo tu contrato…' : 'Analizando tu contrato… esto puede tardar unos segundos.'}</p>
+          {stage === 'uploading' ? (
+            <p>Subiendo tu contrato…</p>
+          ) : (
+            <>
+              {/* A full analysis takes a minute or two. Saying "unos segundos" (as this did while
+                  the call was synchronous) trains people to think it's stuck and reload, which
+                  throws away a paid analysis mid-flight. */}
+              <p>Analizando tu contrato…</p>
+              <p className="status-panel__hint">
+                Esto suele tardar entre uno y dos minutos. No cierres esta página.
+              </p>
+            </>
+          )}
         </div>
       )}
 

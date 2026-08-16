@@ -13,8 +13,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Exposes the analysis pipeline over HTTP: {@code POST /upload-url} (presigned S3 PUT, T4) and
- * {@code POST /analyze} (orchestration, T8/T9).
+ * Exposes the analysis pipeline over HTTP: {@code POST /upload-url} (presigned S3 PUT, T4),
+ * {@code POST /analyze} (accept a job, T8/T9) and {@code GET /analyze/{jobId}} (poll for the
+ * result).
+ *
+ * <p>Analysis is asynchronous because it has to be: API Gateway's REST integration timeout is a
+ * hard, unconfigurable 29 seconds and a real analysis takes ~83-92s, so the synchronous version of
+ * this API returned 504 on every cache miss. Three Lambdas are involved — the public
+ * accept/poll handler, the analyze-worker it fires in the background, and extract-text.
  */
 public class LeaseLensApiStack extends Stack {
 
@@ -106,17 +112,28 @@ public class LeaseLensApiStack extends Stack {
         // grant (not the browser's) when the presigned PUT actually happens.
         storageStack.getContractUploadsBucket().grantPut(generateUploadUrlFn);
 
-        // Lambda: analyze-contract — the public orchestration entry point.
-        Function analyzeContractFn = Function.Builder.create(this, "AnalyzeContractFn")
-                .functionName("leaselens-analyze-contract")
+        // Lambda: analyze-worker — the actual analysis pipeline, never exposed via API Gateway.
+        // Invoked asynchronously (InvocationType.EVENT) by the API handler below, which is the
+        // whole point: a real analysis takes ~83-92s on the model that passes the T12 quality gate
+        // (measured live 2026-08-16), while API Gateway caps a REST integration at a hard,
+        // unconfigurable 29s. Running this work behind a job id is the only way to keep it inside
+        // the platform's limits — no model is fast enough (the quickest quality-tested candidate,
+        // claude-haiku-4.5, still needed 29.5-38.6s and failed the gate on quote fidelity).
+        Function analyzeWorkerFn = Function.Builder.create(this, "AnalyzeWorkerFn")
+                .functionName("leaselens-analyze-worker")
                 .runtime(Runtime.JAVA_21)
-                .handler("com.leaselens.AnalyzeContractHandler::handleRequest")
+                .handler("com.leaselens.AnalyzeWorkerHandler::handleRequest")
                 .code(Code.fromAsset("../functions/analyze-contract/target/analyze-contract.jar"))
                 .memorySize(512)
                 // Covers a full scanned-contract chain: Lambda-to-Lambda call to extract-text
                 // (up to its own 90s timeout for the T6 vision-OCR fallback) plus this Lambda's
-                // own OpenRouter analysis call (client-side timeout 60s), with headroom.
-                .timeout(Duration.seconds(180))
+                // own OpenRouter analysis call (client-side timeout 60s), with headroom. No longer
+                // constrained by anything on the HTTP side, since nobody is waiting on the socket.
+                .timeout(Duration.seconds(300))
+                // An EVENT invocation is retried by Lambda on failure; the worker records its own
+                // terminal failures in the job record and returns normally, so a retry here would
+                // only ever repeat a genuine crash — and repeating a crashed LLM call costs money.
+                .retryAttempts(0)
                 .environment(Map.of(
                         "TABLE_NAME", storageStack.getAnalysesTable().getTableName(),
                         "EXTRACT_TEXT_FUNCTION_NAME", extractTextFn.getFunctionName(),
@@ -127,23 +144,45 @@ public class LeaseLensApiStack extends Stack {
                 ))
                 .build();
 
-        storageStack.getAnalysesTable().grantReadWriteData(analyzeContractFn);
-        extractTextFn.grantInvoke(analyzeContractFn);
+        storageStack.getAnalysesTable().grantReadWriteData(analyzeWorkerFn);
+        extractTextFn.grantInvoke(analyzeWorkerFn);
 
-        // Allow analyze-contract to read the externally-managed SecureString OpenRouter key and
-        // decrypt it, plus the plain-String model config parameter.
+        // Allow analyze-worker to read the externally-managed SecureString OpenRouter key and
+        // decrypt it, plus the plain-String model config parameter. Note this grant lives only on
+        // the worker now — the public-facing Lambda below never calls an LLM, so it has no
+        // business holding the API key.
         String ssmBase = "arn:aws:ssm:" + getRegion() + ":" + getAccount() + ":parameter";
-        analyzeContractFn.addToRolePolicy(PolicyStatement.Builder.create()
+        analyzeWorkerFn.addToRolePolicy(PolicyStatement.Builder.create()
                 .actions(List.of("ssm:GetParameter"))
                 .resources(List.of(
                         ssmBase + OPENROUTER_API_KEY_PARAM,
                         ssmBase + OPENROUTER_MODEL_PARAM
                 ))
                 .build());
-        analyzeContractFn.addToRolePolicy(PolicyStatement.Builder.create()
+        analyzeWorkerFn.addToRolePolicy(PolicyStatement.Builder.create()
                 .actions(List.of("kms:Decrypt", "kms:GenerateDataKey"))
                 .resources(List.of("arn:aws:kms:" + getRegion() + ":" + getAccount() + ":alias/aws/ssm"))
                 .build());
+
+        // Lambda: analyze-contract — the public entry point. Only accepts jobs and reports their
+        // status; it does no analysis itself, so it stays fast and its timeout can be short.
+        Function analyzeContractFn = Function.Builder.create(this, "AnalyzeContractFn")
+                .functionName("leaselens-analyze-contract")
+                .runtime(Runtime.JAVA_21)
+                .handler("com.leaselens.AnalyzeContractHandler::handleRequest")
+                .code(Code.fromAsset("../functions/analyze-contract/target/analyze-contract.jar"))
+                .memorySize(512)
+                // A DynamoDB write plus an async Lambda invoke; the only slow part is a Java cold
+                // start. Well inside API Gateway's 29s cap, which is the point of the redesign.
+                .timeout(Duration.seconds(30))
+                .environment(Map.of(
+                        "TABLE_NAME", storageStack.getAnalysesTable().getTableName(),
+                        "ANALYZE_WORKER_FUNCTION_NAME", analyzeWorkerFn.getFunctionName()
+                ))
+                .build();
+
+        storageStack.getAnalysesTable().grantReadWriteData(analyzeContractFn);
+        analyzeWorkerFn.grantInvoke(analyzeContractFn);
 
         // API Gateway with CORS preflight for the browser PWA.
         RestApi api = RestApi.Builder.create(this, "LeaseLensApi")
@@ -151,7 +190,8 @@ public class LeaseLensApiStack extends Stack {
                 .description("LeaseLens rental contract analyzer REST API")
                 .defaultCorsPreflightOptions(CorsOptions.builder()
                         .allowOrigins(Cors.ALL_ORIGINS)
-                        .allowMethods(List.of("POST", "OPTIONS"))
+                        // GET is needed for the analysis-status polling route below.
+                        .allowMethods(List.of("GET", "POST", "OPTIONS"))
                         .allowHeaders(List.of("Content-Type"))
                         .build())
                 // T13 abuse guard: caps request rate across the whole API (both routes share
@@ -171,5 +211,10 @@ public class LeaseLensApiStack extends Stack {
 
         Resource analyzeResource = api.getRoot().addResource("analyze");
         analyzeResource.addMethod("POST", new LambdaIntegration(analyzeContractFn));
+        // Polling route: the client gets a jobId from POST /analyze and reads progress here until
+        // the analysis is done. Same Lambda as the POST, so repeated polls reuse a warm execution
+        // environment instead of paying a Java cold start each time.
+        analyzeResource.addResource("{jobId}")
+                .addMethod("GET", new LambdaIntegration(analyzeContractFn));
     }
 }
