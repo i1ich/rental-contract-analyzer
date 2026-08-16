@@ -34,10 +34,17 @@ import java.util.List;
 public class OpenRouterAnalysisService implements ContractAnalysisService {
 
     private static final String OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
-    // Default model routed through OpenRouter — 1M context, strong reasoning for the T7 prompt's
-    // multi-step contract analysis, and free; override via the OPENROUTER_MODEL_PARAM SSM param
-    // (or OPENROUTER_MODEL env var locally) to try other OpenRouter models.
-    private static final String DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
+    // Default model routed through OpenRouter, used only when neither OPENROUTER_MODEL (env,
+    // local runs) nor OPENROUTER_MODEL_PARAM (SSM) yields a value — i.e. this is the silent
+    // fallback for a misconfigured or unreadable SSM param in production, not a normal path.
+    // It is therefore deliberately the model this project's own T12 golden-set gate has actually
+    // passed on (100% recall, 0 hallucinated quotes, 2026-07-13), so degrading to the fallback
+    // degrades cost, never correctness. Was `nvidia/nemotron-3-ultra-550b-a55b:free`, which is
+    // disqualified for this fallback: it takes ~85s on a real contract, well past API Gateway's
+    // hard, unconfigurable 29s integration timeout, so falling back to it would have turned any
+    // SSM read failure into a 504 on every request. Override via the SSM param (or the env var
+    // locally) to try other OpenRouter models.
+    private static final String DEFAULT_MODEL = "anthropic/claude-sonnet-5";
     // A real Uruguayan rental contract with this checklist commonly needs 5-8K completion
     // tokens for the full findings JSON; 4096 silently truncated mid-JSON on the golden set
     // (finish_reason "length") during the first live T12 run against OpenRouter. 12000 leaves

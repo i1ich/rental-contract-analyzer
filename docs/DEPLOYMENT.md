@@ -31,12 +31,12 @@ modules must be packaged *before* `cdk synth`/`cdk deploy`:
 | Parameter | Type | Purpose |
 |---|---|---|
 | `/leaselens/openrouter-api-key` | `SecureString` | OpenRouter API key, read at Lambda cold start (shared by both Lambdas below) |
-| `/leaselens/openrouter-model` | `String` | OpenRouter model id for contract analysis (`analyze-contract`) — defaults to `nvidia/nemotron-3-ultra-550b-a55b:free` if unset |
+| `/leaselens/openrouter-model` | `String` | OpenRouter model id for contract analysis (`analyze-contract`) — defaults to `anthropic/claude-sonnet-5` if unset, the only model this project's T12 golden-set gate has actually passed on. Avoid `nvidia/nemotron-3-ultra-550b-a55b:free` here despite being free: it takes ~85s on a real contract, past API Gateway's hard 29s timeout. |
 | `/leaselens/openrouter-vision-model` | `String` | OpenRouter model id for scanned-contract OCR transcription (`extract-text`, T6) — defaults to `google/gemini-2.5-flash-lite` if unset. Independent from the analysis model above since transcription and structured-JSON analysis have different cost/quality tradeoffs. |
 
 ```sh
 aws ssm put-parameter --name /leaselens/openrouter-api-key --type SecureString --value "sk-or-v1-..."
-aws ssm put-parameter --name /leaselens/openrouter-model --type String --value "nvidia/nemotron-3-ultra-550b-a55b:free"
+aws ssm put-parameter --name /leaselens/openrouter-model --type String --value "anthropic/claude-sonnet-5"
 aws ssm put-parameter --name /leaselens/openrouter-vision-model --type String --value "google/gemini-2.5-flash-lite"
 ```
 
