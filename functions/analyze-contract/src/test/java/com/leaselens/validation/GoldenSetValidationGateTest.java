@@ -18,7 +18,6 @@ import java.util.Locale;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * T12 — Validation gate against the real golden set (see mvp3 plan).
@@ -65,6 +64,8 @@ class GoldenSetValidationGateTest {
         int matchedTotal = 0;
         List<String> hallucinations = new ArrayList<>();
         List<String> misses = new ArrayList<>();
+        List<Long> latenciesMs = new ArrayList<>();
+        List<String> analysisFailures = new ArrayList<>();
         StringBuilder report = new StringBuilder("\n=== T12 golden-set validation gate ===\n");
 
         for (Path annotationFile : annotationFiles) {
@@ -73,14 +74,37 @@ class GoldenSetValidationGateTest {
             String contractText = Files.readString(dir.resolve(annotation.path("contractFile").asText()));
 
             // Live LLM call — parse failures here are themselves a gate failure
-            // ("valid JSON every time").
+            // ("valid JSON every time"). Recorded and carried on rather than aborting: bailing on
+            // the first bad contract used to discard the recall/latency data already paid for on
+            // the earlier ones, which is exactly what happened evaluating claude-3-haiku (v0.6)
+            // and claude-haiku-4.5 (v0.7) — both times the run cost real money and produced a
+            // single line of usable information. The gate still fails at the end.
             AnalysisResult result;
+            long startedAt = System.nanoTime();
             try {
                 result = service.analyze(contractText);
             } catch (RuntimeException e) {
-                fail("Analysis failed (invalid JSON or API error) for " + contractId + ": " + e.getMessage());
-                return;
+                long failedAfterMs = (System.nanoTime() - startedAt) / 1_000_000;
+                latenciesMs.add(failedAfterMs);
+                analysisFailures.add(contractId + ": " + e.getMessage());
+                // Count this contract's expected findings as missed — the model returned nothing
+                // usable, so its real recall here is zero, and quietly excluding it would flatter
+                // the overall number.
+                for (JsonNode ef : annotation.path("expectedFindings")) {
+                    expectedTotal++;
+                    misses.add(contractId + ": " + ef.path("id").asText());
+                }
+                report.append(String.format(Locale.ROOT, "%-28s ANALYSIS FAILED after %.1fs — %s%n",
+                        contractId, failedAfterMs / 1000.0, e.getMessage()));
+                continue;
             }
+            // Measured because recall alone can't tell you whether a model is shippable: this gate
+            // calls the service directly, so it never crosses API Gateway's hard, unconfigurable
+            // 29s integration timeout the way production does. claude-sonnet-5 passes this gate on
+            // quality and still 504s every cache-miss request live (~83-92s per contract, measured
+            // 2026-08-16). Reported, not asserted — picking the cutoff is a product decision.
+            long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000;
+            latenciesMs.add(elapsedMs);
 
             String normalizedContract = normalize(contractText);
             String haystack = normalize(findingsAsText(result));
@@ -111,17 +135,29 @@ class GoldenSetValidationGateTest {
             }
             expectedTotal += expected;
             matchedTotal += matched;
-            report.append(String.format(Locale.ROOT, "%-28s recall %d/%d, findings returned: %d%n",
-                    contractId, matched, expected, result.getFindings().size()));
+            report.append(String.format(Locale.ROOT, "%-28s recall %d/%d, findings returned: %d, %.1fs%n",
+                    contractId, matched, expected, result.getFindings().size(), elapsedMs / 1000.0));
         }
 
         double recall = expectedTotal == 0 ? 0 : (double) matchedTotal / expectedTotal;
         report.append(String.format(Locale.ROOT, "OVERALL recall: %.0f%% (%d/%d), hallucinated quotes: %d%n",
                 recall * 100, matchedTotal, expectedTotal, hallucinations.size()));
+        if (!latenciesMs.isEmpty()) {
+            long worst = latenciesMs.stream().mapToLong(Long::longValue).max().orElse(0);
+            double mean = latenciesMs.stream().mapToLong(Long::longValue).average().orElse(0);
+            report.append(String.format(Locale.ROOT,
+                    "LATENCY model=%s mean %.1fs, worst %.1fs (API Gateway hard cap: 29s)%n",
+                    System.getenv().getOrDefault("OPENROUTER_MODEL", "(from SSM/default)"),
+                    mean / 1000.0, worst / 1000.0));
+        }
         if (!misses.isEmpty()) report.append("Missed: ").append(misses).append('\n');
         if (!hallucinations.isEmpty()) report.append("Hallucinated: ").append(hallucinations).append('\n');
+        if (!analysisFailures.isEmpty()) report.append("Analysis failures: ").append(analysisFailures).append('\n');
         System.out.println(report);
 
+        assertTrue(analysisFailures.isEmpty(),
+                "Model did not return usable output for every contract (the gate's \"valid JSON every "
+                        + "time\" criterion): " + analysisFailures);
         assertTrue(hallucinations.isEmpty(), "Hallucinated quotes found: " + hallucinations);
         assertTrue(recall >= RECALL_GATE, String.format(Locale.ROOT,
                 "Recall %.0f%% below the %.0f%% gate. Missed: %s — loop back to T7 (prompt).",
