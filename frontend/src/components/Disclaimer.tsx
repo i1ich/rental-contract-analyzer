@@ -13,9 +13,10 @@
 //            recipients, and art. 23 makes the transfer itself conditional on a legal basis —
 //            per URCDP Resolución 63/023 the US is adequate only for Data Privacy Framework
 //            participants, and as of 2026-08-16 neither Anthropic nor OpenRouter is listed.
-// Open question for the review, deliberately NOT decided here because it changes the upload flow
-// rather than the copy: whether art. 23's "consentimiento inequívoco" needs an explicit checkbox
-// before upload instead of this passive notice. See the private T14 research + lawyer checklist.
+// The art. 23 "consentimiento inequívoco" question this file used to defer is now answered in the
+// flow rather than in copy: TransferConsent gates the upload behind an explicit unticked checkbox,
+// so this notice explains the transfer and the checkbox is the act of accepting it. The exact
+// wording of both is still question 1 on the private lawyer checklist.
 // Also still missing, deliberately: art. 13 also requires naming the controller's identity and
 // address plus a channel for access/rectification/deletion requests. Those are facts about Ilia
 // (or a future legal entity), not copy an assistant can invent, so they are left out rather than
@@ -37,7 +38,9 @@ export default function Disclaimer() {
         <strong>Cómo tratamos tu contrato.</strong> No pedimos cuenta ni datos de identidad: el
         análisis es anónimo. Para poder analizarlo, el texto de tu contrato —y, si subís una foto
         o un escaneo, las imágenes de sus páginas— se envía a proveedores de inteligencia
-        artificial ubicados en Estados Unidos. Al subir un archivo aceptás esa transferencia.
+        artificial ubicados en Estados Unidos. Por eso te pedimos que aceptes expresamente esa
+        transferencia antes de subir el archivo: si no lo hacés, tu contrato no sale de tu
+        dispositivo.
       </p>
       <p className="disclaimer__privacy">
         <strong>Cuánto tiempo guardamos cada cosa.</strong> El archivo original se borra de

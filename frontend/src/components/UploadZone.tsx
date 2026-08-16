@@ -4,14 +4,31 @@ import { MAX_UPLOAD_SIZE_BYTES } from '../api'
 interface UploadZoneProps {
   onFileSelected: (file: File) => void
   disabled: boolean
+  /**
+   * Shown when someone tries to use the zone while it's disabled. Without this a blocked click
+   * just silently does nothing, which reads as a broken page rather than as a missing step.
+   */
+  disabledReason?: string
 }
 
 const MAX_SIZE_LABEL = `${Math.round(MAX_UPLOAD_SIZE_BYTES / (1024 * 1024))} MB`
 
-export default function UploadZone({ onFileSelected, disabled }: UploadZoneProps) {
+export default function UploadZone({ onFileSelected, disabled, disabledReason }: UploadZoneProps) {
   const [isDragOver, setIsDragOver] = useState(false)
   const [validationError, setValidationError] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  /** Returns true when the interaction was blocked, having explained why. */
+  function blockedWhileDisabled() {
+    if (!disabled) return false
+    if (disabledReason) setValidationError(disabledReason)
+    return true
+  }
+
+  function openFilePicker() {
+    if (blockedWhileDisabled()) return
+    inputRef.current?.click()
+  }
 
   function validateAndSelect(file: File | undefined) {
     if (!file) return
@@ -30,7 +47,7 @@ export default function UploadZone({ onFileSelected, disabled }: UploadZoneProps
   function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
     setIsDragOver(false)
-    if (disabled) return
+    if (blockedWhileDisabled()) return
     validateAndSelect(event.dataTransfer.files[0])
   }
 
@@ -44,14 +61,16 @@ export default function UploadZone({ onFileSelected, disabled }: UploadZoneProps
         }}
         onDragLeave={() => setIsDragOver(false)}
         onDrop={handleDrop}
-        onClick={() => !disabled && inputRef.current?.click()}
+        onClick={openFilePicker}
         role="button"
-        tabIndex={disabled ? -1 : 0}
+        // Stays focusable even when disabled: a keyboard user needs to be able to reach it and be
+        // told what's missing, which a tabIndex of -1 would prevent.
+        tabIndex={0}
         aria-disabled={disabled}
         onKeyDown={(event) => {
-          if (!disabled && (event.key === 'Enter' || event.key === ' ')) {
+          if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault()
-            inputRef.current?.click()
+            openFilePicker()
           }
         }}
       >

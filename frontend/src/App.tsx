@@ -2,6 +2,7 @@ import { useState } from 'react'
 import UploadZone from './components/UploadZone'
 import ResultsView from './components/ResultsView'
 import Disclaimer from './components/Disclaimer'
+import TransferConsent from './components/TransferConsent'
 import { ApiError, analyzeContract, requestUploadUrl, uploadFile } from './api'
 import type { AnalysisResult } from './types'
 import { MOCK_ANALYSIS_RESULT } from './mockData'
@@ -13,11 +14,16 @@ export default function App() {
   const [stage, setStage] = useState<Stage>('idle')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [result, setResult] = useState<AnalysisResult | null>(null)
+  // Consent to the cross-border transfer — see TransferConsent for why this gate exists.
+  const [transferConsent, setTransferConsent] = useState(false)
 
   function reset() {
     setStage('idle')
     setErrorMessage(null)
     setResult(null)
+    // Cleared deliberately: consent is given per transfer, so analyzing another contract asks
+    // again rather than carrying over the previous contract's answer.
+    setTransferConsent(false)
   }
 
   async function handleFileSelected(file: File) {
@@ -47,7 +53,12 @@ export default function App() {
 
       {stage === 'idle' && (
         <>
-          <UploadZone onFileSelected={handleFileSelected} disabled={false} />
+          <TransferConsent checked={transferConsent} onChange={setTransferConsent} />
+          <UploadZone
+            onFileSelected={handleFileSelected}
+            disabled={!transferConsent}
+            disabledReason="Para poder analizar tu contrato necesitamos tu consentimiento: marcá la casilla de arriba."
+          />
           {import.meta.env.DEV && (
             <button type="button" className="button button--dev" onClick={() => { setResult(MOCK_ANALYSIS_RESULT); setStage('done') }}>
               Ver datos de ejemplo (solo dev)
