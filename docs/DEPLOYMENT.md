@@ -85,14 +85,6 @@ the bucket/distribution configuration changes.
 
 ## Known issues
 
-- **Cache-miss analyses time out (blocking).** `anthropic/claude-sonnet-5` takes ~83-92s on a real
-  contract — measured live 2026-08-16 via the Lambda's own CloudWatch `REPORT` lines — while API
-  Gateway's REST integration timeout is hard-capped at 29s and is not configurable. So a first
-  analysis of any contract returns **504** even though the Lambda finishes and caches the result;
-  a repeat request then returns the cached analysis in well under a second. Extraction is not the
-  bottleneck (1.3s text-layer, 9.1s vision-OCR) — the analysis call is, since it generates 5-8K
-  completion tokens. Fixing it means either a faster model (`claude-haiku-4.5` is the untested
-  candidate) or making `/analyze` asynchronous.
 - **The service worker serves the previous build after a deploy.** After `aws s3 sync` and a
   *completed* CloudFront invalidation, returning visitors still load the old JS bundle from the
   PWA precache; `registerType: 'autoUpdate'` picks up the new build one reload later. Bypass it
@@ -125,26 +117,38 @@ curl -X PUT "<uploadUrl from step 1>" \
   -H 'Content-Type: application/pdf' \
   --data-binary @sample-contract.pdf
 
-# 3. Analyze it.
+# 3. Start the analysis. Returns 202 immediately with a job id — it does NOT wait for the result.
 curl -X POST https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod/analyze \
   -H 'Content-Type: application/json' \
   -d '{"objectKey": "<objectKey from step 1>"}'
+# => 202 {"jobId": "<uuid>", "status": "pending"}
+
+# 4. Poll until it settles (the frontend polls every 2s).
+curl https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod/analyze/<jobId>
+# => {"status":"pending"}
+#  | {"status":"done","result":{"summary":..., "findings":[...]}}
+#  | {"status":"error","errorStatusCode":422,"error":"..."}
 ```
 
-Expect a JSON body with `summary` and `findings[]` — **but not on the first call**: see "Known
-issues" above. A cache-miss analysis currently exceeds API Gateway's 29s cap and returns 504 for
-text-layer and scanned contracts alike, while the Lambda keeps running and caches the result; call
-step 3 again and the cached analysis comes back in well under a second (`cachedAt` set). Measured
-2026-08-16: text-layer 504 → 504 → 200 in 719ms (13 findings, 12/12 quotes verbatim); scanned
-504 → 504 → 200 in 612ms (10 findings).
+Analysis is asynchronous because it has to be: a real analysis takes ~80-92s on `claude-sonnet-5`
+and API Gateway caps a REST integration at a hard, unconfigurable 29s, so the earlier synchronous
+version returned 504 on every cache miss. No model is fast enough to fix that — `claude-haiku-4.5`,
+the fastest quality-tested candidate, still needed 29.5-38.6s (and failed the T12 gate on quote
+fidelity). A failed analysis comes back as HTTP 200 carrying `status: "error"` plus the status code
+the synchronous endpoint would have used, so a failed *analysis* stays distinguishable from a
+failed *poll*.
 
-If the PDF has no native text layer,
-`analyze-contract` now transparently falls back to vision-model OCR (T6, via OpenRouter — not
-AWS Textract, which isn't available in this region) before deciding whether there's enough usable
-text — a `422` at that point means OCR itself came up empty (e.g. a low-quality scan), not simply
-"scanned PDFs aren't supported". Note that a scanned contract's first request can take 15-30s
-(OCR + analysis back to back) and may hit API Gateway's 29s hard timeout even though the Lambda
-succeeds moments later — retry once if you see a 504 on a scan.
+Measured live 2026-08-16 after the async switch: `POST /analyze` 202 in **305-378ms**; a cache-miss
+text-layer contract settled **done in 81.7s over 37 polls** (14 findings, 14/14 quotes verbatim,
+worker Lambda duration 80.0s); cache hits settled in **0.5-2.5s**. Poll requests cost the API
+Lambda 5-125ms each.
+
+If the PDF has no native text layer, the worker transparently falls back to vision-model OCR (T6,
+via OpenRouter — not AWS Textract, which isn't available in this region) before deciding whether
+there's enough usable text. An `errorStatusCode: 422` at that point means OCR itself came up empty
+(e.g. a low-quality scan), not simply "scanned PDFs aren't supported". A scanned contract just
+takes longer to settle (OCR ~9s on top of the analysis); the 29s cap no longer applies, since
+nothing is waiting on the HTTP socket.
 
 The old manual-upload path (`aws s3 cp contract.pdf s3://<bucket>/manual-test/contract.pdf`,
 then passing that key straight to `/analyze`) still works too, e.g. for a quick test that skips
