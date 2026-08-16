@@ -8,9 +8,13 @@ recipe end to end.
 
 - AWS account + credentials configured (`aws configure` or an SSO profile), same as `photolist-latam`.
 - JDK 21 available and used for `java`/Maven — this machine has JDK 8 as the default `java` on
-  `PATH` and JDK 21 installed separately; point `JAVA_HOME` at the JDK 21 install
-  (`C:\Users\<you>\.jdks\openjdk-21.0.2` or wherever it lives) before running `cdk` commands,
-  otherwise the CDK app fails to load with `UnsupportedClassVersionError`.
+  `PATH` and JDK 21 installed separately (`C:\Users\<you>\.jdks\openjdk-21.0.2` or wherever it
+  lives). **Setting `JAVA_HOME` alone is not enough for `cdk`:** `cdk.json`'s app command is
+  `java -jar target/leaselens-infrastructure.jar`, which resolves `java` from `PATH` and ignores
+  `JAVA_HOME` entirely, so the CDK app still fails to load with `UnsupportedClassVersionError`
+  (`class file version 65.0`). Prepend JDK 21's `bin` to `PATH` for the `cdk` commands —
+  `$env:PATH = "C:\Users\<you>\.jdks\openjdk-21.0.2\bin;" + $env:PATH` in PowerShell. `JAVA_HOME`
+  is still what Maven needs.
 - Node.js + `npx` (used to run the AWS CDK CLI: `npx aws-cdk@2.130.0 <command>`, matching the
   `aws-cdk-lib` version pinned in `infrastructure/pom.xml`).
 
@@ -79,16 +83,29 @@ The stack outputs `FrontendBucketName`, `FrontendDistributionId`, and `FrontendU
 sync + invalidation any time the frontend changes; the CDK deploy itself only needs re-running if
 the bucket/distribution configuration changes.
 
-## What's NOT wired yet
+## Known issues
 
-- **Cost/abuse/privacy guards (T13)** — no API Gateway throttling; `generate-upload-url`'s max
-  file size check is a client-declared `fileSizeBytes` soft check only (see its Javadoc) — a
-  presigned PUT can't enforce an upload's actual byte count the way a presigned POST policy can.
-  The vision-OCR call's per-run cost isn't budget-capped. It's also not fully deterministic
-  run-to-run on the same scanned document (confirmed live), which means `analyze-contract`'s
-  content-hash cache rarely hits for scanned contracts specifically — every request tends to
-  re-run the full OCR+analysis chain, worth a guard here.
-- **CI/CD (T15)** — no GitHub Actions workflow yet; builds are local only.
+- **Cache-miss analyses time out (blocking).** `anthropic/claude-sonnet-5` takes ~83-92s on a real
+  contract — measured live 2026-08-16 via the Lambda's own CloudWatch `REPORT` lines — while API
+  Gateway's REST integration timeout is hard-capped at 29s and is not configurable. So a first
+  analysis of any contract returns **504** even though the Lambda finishes and caches the result;
+  a repeat request then returns the cached analysis in well under a second. Extraction is not the
+  bottleneck (1.3s text-layer, 9.1s vision-OCR) — the analysis call is, since it generates 5-8K
+  completion tokens. Fixing it means either a faster model (`claude-haiku-4.5` is the untested
+  candidate) or making `/analyze` asynchronous.
+- **The service worker serves the previous build after a deploy.** After `aws s3 sync` and a
+  *completed* CloudFront invalidation, returning visitors still load the old JS bundle from the
+  PWA precache; `registerType: 'autoUpdate'` picks up the new build one reload later. Bypass it
+  when verifying a deploy (unregister the service worker and clear caches), and don't treat "the
+  live page still looks old" as a failed sync without checking `index.html` at the origin first.
+- **`generate-upload-url`'s size check is soft.** It's a client-declared `fileSizeBytes` (see its
+  Javadoc) — a presigned PUT can't enforce an upload's actual byte count the way a presigned POST
+  policy can. Hard enforcement lives downstream in `ExtractTextHandler.MAX_OBJECT_SIZE_BYTES`,
+  which rejects on the object's real `Content-Length` before any parsing or LLM cost (T13).
+- **Vision-OCR transcription is not fully deterministic** run-to-run on the same scan. `OcrTextCache`
+  keys transcribed text by the S3 object's ETag (48h TTL) so a retry of the same upload reuses its
+  transcription and `analyze-contract`'s content-hash cache can hit — confirmed live: 9,101ms on
+  the first OCR pass, 112ms on a retry.
 
 ## Smoke test (once deployed)
 
@@ -114,7 +131,14 @@ curl -X POST https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod/analyze \
   -d '{"objectKey": "<objectKey from step 1>"}'
 ```
 
-Expect a JSON body with `summary` and `findings[]`. If the PDF has no native text layer,
+Expect a JSON body with `summary` and `findings[]` — **but not on the first call**: see "Known
+issues" above. A cache-miss analysis currently exceeds API Gateway's 29s cap and returns 504 for
+text-layer and scanned contracts alike, while the Lambda keeps running and caches the result; call
+step 3 again and the cached analysis comes back in well under a second (`cachedAt` set). Measured
+2026-08-16: text-layer 504 → 504 → 200 in 719ms (13 findings, 12/12 quotes verbatim); scanned
+504 → 504 → 200 in 612ms (10 findings).
+
+If the PDF has no native text layer,
 `analyze-contract` now transparently falls back to vision-model OCR (T6, via OpenRouter — not
 AWS Textract, which isn't available in this region) before deciding whether there's enough usable
 text — a `422` at that point means OCR itself came up empty (e.g. a low-quality scan), not simply
