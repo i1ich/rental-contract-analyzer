@@ -58,18 +58,23 @@ public class AnalyzeContractHandler implements
 
     @Override
     public APIGatewayProxyResponseEvent handleRequest(APIGatewayProxyRequestEvent event, Context context) {
+        // Lambda reuses threads across invocations, so never inherit the previous request's id.
+        Log.clearCorrelationId();
         try {
             String method = event == null || event.getHttpMethod() == null
                     ? "POST" : event.getHttpMethod().toUpperCase();
             return "GET".equals(method) ? getJobStatus(event) : startJob(event);
         } catch (ServiceException e) {
+            Log.warn("request_failed", "status", 502, "reason", e.getMessage());
             return jsonResponse(502, Map.of("error", e.getMessage()));
         } catch (IllegalArgumentException e) {
+            Log.warn("request_rejected", "status", 400, "reason", e.getMessage());
             return jsonResponse(400, Map.of("error", e.getMessage()));
         } catch (Exception e) {
-            // Never leak raw contract text into logs or error bodies.
-            System.err.println("Unexpected error [" + e.getClass().getName() + "]: " + e.getMessage());
-            e.printStackTrace(System.err);
+            // Never leak raw contract text into logs or error bodies: exception class, message
+            // and a compacted stack only — the same discipline as before, now on one line so the
+            // trace stays attached to the event instead of becoming one log record per frame.
+            Log.error("unexpected_error", e);
             return jsonResponse(500, Map.of("error", "Error interno del servidor"));
         }
     }
@@ -78,15 +83,20 @@ public class AnalyzeContractHandler implements
     private APIGatewayProxyResponseEvent startJob(APIGatewayProxyRequestEvent event) {
         AnalyzeContractRequest request = parseRequest(event);
         if (request.getObjectKey() == null || request.getObjectKey().isBlank()) {
+            Log.warn("request_rejected", "status", 400, "reason", "objectKey is required");
             return jsonResponse(400, Map.of("error", "objectKey is required"));
         }
 
         String jobId = UUID.randomUUID().toString();
+        // From here on every line of this invocation carries the jobId, which is also what the
+        // worker Lambda stamps its own lines with — the two log groups join on this field.
+        Log.setCorrelationId(jobId);
         // Written before the invoke so a status poll that races ahead of the worker finds PENDING
         // rather than a 404 that the client would reasonably read as "this job never existed".
         jobStore.createPending(jobId);
         workerInvoker.startAnalysis(jobId, request.getObjectKey().trim());
 
+        Log.event("job_accepted", "objectKey", request.getObjectKey().trim());
         return jsonResponse(202, Map.of("jobId", jobId, "status", "pending"));
     }
 
@@ -95,13 +105,24 @@ public class AnalyzeContractHandler implements
         Map<String, String> pathParams = event.getPathParameters();
         String jobId = pathParams == null ? null : pathParams.get("jobId");
         if (jobId == null || jobId.isBlank()) {
+            Log.warn("request_rejected", "status", 400, "reason", "jobId is required");
             return jsonResponse(400, Map.of("error", "jobId is required"));
         }
 
+        Log.setCorrelationId(jobId);
         AnalysisJobStore.Job job = jobStore.get(jobId);
         if (job == null) {
+            Log.warn("job_not_found", "status", 404);
             return jsonResponse(404, Map.of("error",
                     "No encontramos este análisis. Puede haber expirado — probá subir el contrato de nuevo."));
+        }
+
+        // Only terminal polls are logged. A client polls every couple of seconds for ~90s, so
+        // logging PENDING would add ~45 lines of noise per analysis and bury the two that matter.
+        String status = String.valueOf(job.status());
+        if (!"PENDING".equals(status)) {
+            Log.event("job_poll_terminal", "jobStatus", status,
+                    "errorStatusCode", job.errorStatusCode());
         }
 
         return switch (job.status()) {

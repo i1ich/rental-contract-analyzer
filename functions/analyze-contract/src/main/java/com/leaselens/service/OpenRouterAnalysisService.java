@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.leaselens.Log;
 import com.leaselens.model.AnalysisResult;
 import com.leaselens.model.Finding;
 import software.amazon.awssdk.services.ssm.SsmClient;
@@ -181,18 +182,33 @@ public class OpenRouterAnalysisService implements ContractAnalysisService {
                 .build();
 
         HttpResponse<String> response;
+        // Latency and status of the one external dependency this system has. Without these two
+        // numbers a degradation of OpenRouter is indistinguishable from a bug in this code.
+        long calledAt = System.currentTimeMillis();
         try {
             response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            Log.warn("model_http_failed", "durationMs", System.currentTimeMillis() - calledAt,
+                    "exceptionClass", e.getClass().getName());
             throw new ServiceException("OpenRouter API request failed: " + e.getMessage());
         } catch (IOException e) {
+            Log.warn("model_http_failed", "durationMs", System.currentTimeMillis() - calledAt,
+                    "exceptionClass", e.getClass().getName());
             throw new ServiceException("OpenRouter API request failed: " + e.getMessage());
         }
+
+        Log.event("model_http_completed",
+                "status", response.statusCode(),
+                "durationMs", System.currentTimeMillis() - calledAt,
+                "model", getModel(),
+                // Body size, never body content: the response embeds quoted contract text.
+                "responseBytes", response.body() == null ? 0 : response.body().length());
 
         if (response.statusCode() != 200) {
             // Do not leak contract text into error messages/logs — only status code and
             // the (contract-text-free) API error body are included.
+            Log.warn("model_http_error", "status", response.statusCode());
             throw new ServiceException("OpenRouter API error: HTTP " + response.statusCode());
         }
 
@@ -290,6 +306,15 @@ public class OpenRouterAnalysisService implements ContractAnalysisService {
             // (Anthropic's Messages API used a top-level "content" array instead).
             JsonNode firstChoice = root.path("choices").path(0);
             assistantText = firstChoice.path("message").path("content").asText(null);
+            // Token counts are the cost signal, and finish_reason is the one that explains a
+            // truncated-JSON failure: "length" means MAX_TOKENS was hit mid-answer, which is
+            // exactly how the 4096-token setting failed on the golden set.
+            JsonNode usage = root.path("usage");
+            Log.event("model_usage",
+                    "promptTokens", usage.path("prompt_tokens").asInt(0),
+                    "completionTokens", usage.path("completion_tokens").asInt(0),
+                    "finishReason", firstChoice.path("finish_reason").asText(""),
+                    "contentLength", assistantText == null ? 0 : assistantText.length());
             if (assistantText == null || assistantText.isBlank()) {
                 throw new ServiceException("OpenRouter response missing message content");
             }

@@ -77,28 +77,52 @@ public class ExtractTextHandler implements RequestHandler<Map<String, Object>, M
             throw new RuntimeException("BUCKET_NAME environment variable is not set");
         }
 
+        // Lambda reuses threads across invocations, so never inherit the previous object's id.
+        Log.clearCorrelationId();
+
         Object objectKeyValue = input != null ? input.get("objectKey") : null;
         if (!(objectKeyValue instanceof String objectKey) || objectKey.isBlank()) {
             throw new RuntimeException("Missing or invalid 'objectKey' in request payload");
         }
 
+        // This Lambda is invoked with an object key and nothing else — no jobId exists here —
+        // so the object key is what joins these lines to the analyze-contract side, where it is
+        // logged on the job_accepted and analysis_started events. It is a generated UUID path
+        // (uploads/<uuid>.pdf), not anything derived from the document or the uploader.
+        Log.setCorrelationId(objectKey);
+        long startedAt = System.currentTimeMillis();
+        Log.event("extract_started");
+
         ResponseBytes<GetObjectResponse> object = readObject(objectKey);
 
         Long contentLength = object.response().contentLength();
+        Log.event("object_read", "bytes", contentLength,
+                "durationMs", System.currentTimeMillis() - startedAt);
         if (contentLength != null && contentLength > MAX_OBJECT_SIZE_BYTES) {
-            System.err.println("Rejected object over the size guard [bytes=" + contentLength + "]");
+            Log.warn("object_rejected", "reason", "too-large", "bytes", contentLength,
+                    "maxBytes", MAX_OBJECT_SIZE_BYTES);
             return toResponse("", 0, false, "too-large");
         }
 
         byte[] pdfBytes = object.asByteArray();
+        long parseStartedAt = System.currentTimeMillis();
         PdfTextExtractor.ExtractionResult result = PdfTextExtractor.extract(pdfBytes);
+        Log.event("pdf_parsed",
+                "durationMs", System.currentTimeMillis() - parseStartedAt,
+                "pageCount", result.pageCount(),
+                "hasTextLayer", result.hasTextLayer(),
+                "textLength", result.text() == null ? 0 : result.text().length());
 
         if (result.hasTextLayer()) {
+            Log.event("extract_completed", "source", result.source(),
+                    "durationMs", System.currentTimeMillis() - startedAt,
+                    "textLength", result.text() == null ? 0 : result.text().length());
             return toResponse(result.text(), result.pageCount(), true, result.source());
         }
 
         if (result.pageCount() > MAX_OCR_PAGES) {
-            System.err.println("Rejected scanned document over the OCR page guard [pages=" + result.pageCount() + "]");
+            Log.warn("object_rejected", "reason", "too-many-pages", "pages", result.pageCount(),
+                    "maxPages", MAX_OCR_PAGES);
             return toResponse("", result.pageCount(), false, "too-many-pages");
         }
 
@@ -106,7 +130,11 @@ public class ExtractTextHandler implements RequestHandler<Map<String, Object>, M
         // (by its S3 ETag) so a retry doesn't risk a different, possibly worse, transcription.
         String eTag = object.response().eTag();
         String cachedText = ocrTextCache.get(eTag);
+        Log.event("ocr_cache_lookup", "hit", cachedText != null);
         if (cachedText != null) {
+            Log.event("extract_completed", "source", "vision-ocr-cached",
+                    "durationMs", System.currentTimeMillis() - startedAt,
+                    "textLength", cachedText.length());
             return toResponse(cachedText, result.pageCount(), false, "vision-ocr-cached");
         }
 
@@ -114,6 +142,7 @@ public class ExtractTextHandler implements RequestHandler<Map<String, Object>, M
         // from S3 above), so pages are rendered locally with PDFBox and sent to the vision
         // model directly; nothing needs to be re-uploaded or staged anywhere.
         String ocrText;
+        long ocrStartedAt = System.currentTimeMillis();
         try {
             ocrText = VisionOcrExtractor.extractText(pdfBytes, visionClient);
         } catch (Exception e) {
@@ -122,15 +151,23 @@ public class ExtractTextHandler implements RequestHandler<Map<String, Object>, M
             // clean "couldn't analyze" 422 rather than surfacing a 500/502 for this. Failures
             // aren't cached, so a later retry gets a fresh attempt rather than being stuck with
             // a permanent empty result.
-            System.err.println("Vision OCR failed for object [class=" + e.getClass().getName()
-                    + "]: " + e.getMessage());
+            Log.error("ocr_failed", e, "pageCount", result.pageCount(),
+                    "durationMs", System.currentTimeMillis() - ocrStartedAt);
             return toResponse("", result.pageCount(), false, "none");
         }
 
         boolean ocrFoundText = ocrText != null && !ocrText.isBlank();
+        Log.event("ocr_completed",
+                "durationMs", System.currentTimeMillis() - ocrStartedAt,
+                "pageCount", result.pageCount(),
+                "foundText", ocrFoundText,
+                "textLength", ocrText == null ? 0 : ocrText.length());
         if (ocrFoundText) {
             ocrTextCache.put(eTag, ocrText);
         }
+        Log.event("extract_completed", "source", ocrFoundText ? "vision-ocr" : "none",
+                "durationMs", System.currentTimeMillis() - startedAt,
+                "textLength", ocrText == null ? 0 : ocrText.length());
         return toResponse(ocrText, result.pageCount(), false, ocrFoundText ? "vision-ocr" : "none");
     }
 

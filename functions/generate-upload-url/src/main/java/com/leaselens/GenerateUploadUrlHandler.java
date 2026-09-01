@@ -55,18 +55,28 @@ public class GenerateUploadUrlHandler implements
 
     @Override
     public APIGatewayProxyResponseEvent handleRequest(APIGatewayProxyRequestEvent event, Context context) {
+        Log.clearCorrelationId();
+
         if (bucketName == null || bucketName.isBlank()) {
-            System.err.println("BUCKET_NAME environment variable is not set");
+            Log.warn("config_missing", "variable", "BUCKET_NAME");
             return jsonResponse(500, Map.of("error", "Error interno del servidor"));
         }
 
         Long declaredSizeBytes = parseDeclaredSizeBytes(event);
         if (declaredSizeBytes != null && declaredSizeBytes > MAX_UPLOAD_SIZE_BYTES) {
+            Log.warn("upload_rejected", "reason", "too-large",
+                    "declaredSizeBytes", declaredSizeBytes, "maxBytes", MAX_UPLOAD_SIZE_BYTES);
             return jsonResponse(400, Map.of("error",
                     "El archivo supera el tamaño máximo permitido (10 MB)."));
         }
 
         UploadUrlGenerator.Result result = UploadUrlGenerator.generate(presigner, bucketName, URL_VALIDITY);
+
+        // The object key is the join field for everything that happens to this upload later,
+        // in both other Lambdas. Note the declared size is the client's claim, not enforcement.
+        Log.event("upload_url_issued", "objectKey", result.objectKey(),
+                "declaredSizeBytes", declaredSizeBytes,
+                "expiresInSeconds", result.expiresInSeconds());
 
         return jsonResponse(200, Map.of(
                 "uploadUrl", result.uploadUrl(),

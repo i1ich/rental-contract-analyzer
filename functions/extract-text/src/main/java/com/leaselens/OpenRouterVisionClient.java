@@ -76,17 +76,32 @@ public class OpenRouterVisionClient implements VisionTranscriptionClient {
                 .build();
 
         HttpResponse<String> response;
+        // Same reasoning as the analysis client: latency and status of the external dependency,
+        // so a degradation is distinguishable from a defect in this code.
+        long calledAt = System.currentTimeMillis();
         try {
             response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            Log.warn("vision_http_failed", "durationMs", System.currentTimeMillis() - calledAt,
+                    "exceptionClass", e.getClass().getName());
             throw new RuntimeException("OpenRouter vision request failed: " + e.getMessage());
         } catch (IOException e) {
+            Log.warn("vision_http_failed", "durationMs", System.currentTimeMillis() - calledAt,
+                    "exceptionClass", e.getClass().getName());
             throw new RuntimeException("OpenRouter vision request failed: " + e.getMessage());
         }
 
+        Log.event("vision_http_completed",
+                "status", response.statusCode(),
+                "durationMs", System.currentTimeMillis() - calledAt,
+                "pages", pageImagesPng == null ? 0 : pageImagesPng.size(),
+                // Body size, never body content: the response is the transcribed contract.
+                "responseBytes", response.body() == null ? 0 : response.body().length());
+
         if (response.statusCode() != 200) {
             // Do not leak image/contract content into error messages/logs — only the status code.
+            Log.warn("vision_http_error", "status", response.statusCode());
             throw new RuntimeException("OpenRouter vision API error: HTTP " + response.statusCode());
         }
 

@@ -91,36 +91,58 @@ public class AnalyzeWorkerHandler implements RequestHandler<Map<String, Object>,
         String jobId = stringField(event, "jobId");
         String objectKey = stringField(event, "objectKey");
 
+        // Lambda reuses threads across invocations, so never inherit the previous job's id.
+        Log.clearCorrelationId();
+
         if (jobId == null || jobId.isBlank()) {
             // Nothing to report progress against — fail loudly in the logs instead of silently.
             throw new IllegalArgumentException("jobId is required");
         }
 
+        // The same id the API handler stamps its lines with: one analysis is one query.
+        Log.setCorrelationId(jobId);
+        long startedAt = System.currentTimeMillis();
+        Log.event("analysis_started", "objectKey", objectKey);
+
         try {
             if (objectKey == null || objectKey.isBlank()) {
+                Log.warn("analysis_failed", "status", 400, "reason", "objectKey is required",
+                        "durationMs", System.currentTimeMillis() - startedAt);
                 jobStore.markFailed(jobId, 400, "objectKey is required");
                 return "failed";
             }
 
             AnalysisResult result = analyze(objectKey.trim());
             jobStore.markDone(jobId, MAPPER.writeValueAsString(result));
+            // cachedAt is set only when the result came back from the cache (the fresh path
+            // explicitly nulls it), so it doubles as the cache-hit flag without new state.
+            Log.event("analysis_completed",
+                    "durationMs", System.currentTimeMillis() - startedAt,
+                    "cacheHit", result.getCachedAt() != null,
+                    "findings", result.getFindings() == null ? 0 : result.getFindings().size());
             return "done";
         } catch (UnusableTextException e) {
+            Log.warn("analysis_failed", "status", 422, "reason", "unusable_text",
+                    "durationMs", System.currentTimeMillis() - startedAt);
             jobStore.markFailed(jobId, 422, e.getMessage());
             return "failed";
         } catch (ServiceException e) {
+            Log.warn("analysis_failed", "status", 502, "reason", e.getMessage(),
+                    "durationMs", System.currentTimeMillis() - startedAt);
             jobStore.markFailed(jobId, 502, e.getMessage());
             return "failed";
         } catch (Exception e) {
-            // Never leak raw contract text into logs or stored error messages.
-            System.err.println("Unexpected error [" + e.getClass().getName() + "]: " + e.getMessage());
-            e.printStackTrace(System.err);
+            // Never leak raw contract text into logs or stored error messages: exception class,
+            // message and a compacted one-line stack only.
+            Log.error("analysis_failed", e, "status", 500,
+                    "durationMs", System.currentTimeMillis() - startedAt);
             try {
                 jobStore.markFailed(jobId, 500, "Error interno del servidor");
             } catch (Exception storeFailure) {
                 // If even recording the failure fails, let Lambda log the original problem —
-                // but don't mask it with the secondary one.
-                System.err.println("Also failed to record job failure [" + storeFailure.getClass().getName() + "]");
+                // but don't mask it with the secondary one. This line is the one that explains
+                // a client stuck polling PENDING forever, so it is worth its own event name.
+                Log.error("job_failure_not_recorded", storeFailure);
             }
             return "failed";
         }
@@ -131,10 +153,20 @@ public class AnalyzeWorkerHandler implements RequestHandler<Map<String, Object>,
         // layer, so "text too short" is the single signal here for "couldn't get usable text" —
         // whether that's because it's not a contract, a blank page, or OCR came up empty on a
         // low-quality scan.
+        long extractStartedAt = System.currentTimeMillis();
         ExtractTextResult extracted = extractTextInvoker.extractText(objectKey);
+        Log.event("text_extracted",
+                "durationMs", System.currentTimeMillis() - extractStartedAt,
+                "source", extracted.getSource(),
+                "pageCount", extracted.getPageCount(),
+                "hasTextLayer", extracted.isHasTextLayer(),
+                // Length only, never content — the same rule that governs every line in here.
+                "textLength", extracted.getText() == null ? 0 : extracted.getText().length());
 
         String contractText = extracted.getText() == null ? "" : extracted.getText().trim();
         if (contractText.length() < MIN_CONTRACT_TEXT_LENGTH) {
+            Log.warn("text_unusable", "textLength", contractText.length(),
+                    "minLength", MIN_CONTRACT_TEXT_LENGTH, "source", extracted.getSource());
             throw new UnusableTextException(
                     "No pudimos extraer suficiente texto de este documento (incluso probando "
                             + "reconocimiento óptico para escaneos). Verificá que sea un contrato "
@@ -142,18 +174,30 @@ public class AnalyzeWorkerHandler implements RequestHandler<Map<String, Object>,
         }
         if (contractText.length() > MAX_CONTRACT_TEXT_LENGTH) {
             // Never log the truncated-off content itself — just the fact and the length.
-            System.err.println("Truncating oversized contract text [originalLength=" + contractText.length() + "]");
+            Log.warn("text_truncated", "originalLength", contractText.length(),
+                    "maxLength", MAX_CONTRACT_TEXT_LENGTH);
             contractText = contractText.substring(0, MAX_CONTRACT_TEXT_LENGTH);
         }
 
         String contentHash = sha256Hex(contractText);
 
+        long cacheStartedAt = System.currentTimeMillis();
         AnalysisResult cached = loadFromCache(contentHash);
+        Log.event("cache_lookup",
+                "hit", cached != null,
+                "durationMs", System.currentTimeMillis() - cacheStartedAt);
         if (cached != null) {
             return cached;
         }
 
+        long modelStartedAt = System.currentTimeMillis();
         AnalysisResult result = analysisService.analyze(contractText);
+        // The dominant cost of a cache miss, and the number the async rewrite exists because of:
+        // this is what has to stay well clear of the Lambda timeout.
+        Log.event("analysis_model_completed",
+                "durationMs", System.currentTimeMillis() - modelStartedAt,
+                "textLength", contractText.length(),
+                "findings", result.getFindings() == null ? 0 : result.getFindings().size());
         result.setCachedAt(null);
         saveToCache(contentHash, result);
         return result;
