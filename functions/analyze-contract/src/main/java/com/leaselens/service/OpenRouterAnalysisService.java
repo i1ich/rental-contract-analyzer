@@ -171,8 +171,8 @@ public class OpenRouterAnalysisService implements ContractAnalysisService {
         }
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(OPENROUTER_CHAT_URL))
-                .timeout(Duration.ofSeconds(60))
+                .uri(URI.create(chatUrl()))
+                .timeout(requestTimeout())
                 .header("Authorization", "Bearer " + getApiKey())
                 .header("Content-Type", "application/json")
                 // Optional but recommended by OpenRouter for attribution/rankings; harmless if ignored.
@@ -259,6 +259,30 @@ public class OpenRouterAnalysisService implements ContractAnalysisService {
             cachedModel = readSsmString(paramName, DEFAULT_MODEL);
             return cachedModel;
         }
+    }
+
+    /**
+     * Local-run override for the golden-set eval: OPENROUTER_BASE_URL (the OpenAI-compatible base
+     * URL of a local server) replaces the OpenRouter host. Never set in Lambda, so production
+     * always uses {@link #OPENROUTER_CHAT_URL}.
+     */
+    private static String chatUrl() {
+        String base = System.getenv("OPENROUTER_BASE_URL");
+        if (base == null || base.isBlank()) return OPENROUTER_CHAT_URL;
+        return base.replaceAll("/+$", "") + "/chat/completions";
+    }
+
+    /**
+     * Only with the base-URL override on: local models can take minutes per contract, so the
+     * timeout comes from OPENROUTER_TIMEOUT_SECONDS (default 600). Without the override it stays
+     * at the 60s production value.
+     */
+    private static Duration requestTimeout() {
+        String base = System.getenv("OPENROUTER_BASE_URL");
+        if (base == null || base.isBlank()) return Duration.ofSeconds(60);
+        String seconds = System.getenv("OPENROUTER_TIMEOUT_SECONDS");
+        if (seconds == null || seconds.isBlank()) return Duration.ofSeconds(600);
+        return Duration.ofSeconds(Long.parseLong(seconds.trim()));
     }
 
     /** Helper: reads a plain-String SSM parameter; returns {@code fallback} on any error. */

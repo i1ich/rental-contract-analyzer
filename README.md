@@ -76,6 +76,8 @@ and needs secrets, and the golden set never lives in this repo — it is real co
 Measured live on a cache-miss text-layer contract: **14 findings, 14/14 quotes verbatim**, settled
 in 81.7s; cache hits settle in 0.5–2.5s; OCR ~9.1s cold, 112ms on a cached retry.
 
+The gate is model-agnostic: the same golden set was re-run against local models served by Ollama — see docs/local_model_eval_2026-10-21.md.
+
 ## Development
 
 ```sh
