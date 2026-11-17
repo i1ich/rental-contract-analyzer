@@ -62,14 +62,41 @@ interface StartAnalysisResponse {
 
 type AnalysisJobStatus =
   | { status: 'pending' }
-  | { status: 'done'; result: AnalysisResult }
+  // remainingUses is the license balance after this analysis was charged (T18).
+  | { status: 'done'; result: AnalysisResult; remainingUses?: number }
   | { status: 'error'; error: string; errorStatusCode: number }
 
-export async function startAnalysis(objectKey: string): Promise<string> {
+export interface AnalysisOutcome {
+  result: AnalysisResult
+  remainingUses: number | null
+}
+
+// The license key lives in localStorage rather than the URL, so it never shows up in browser
+// history, server logs or referrers. Storage can be blocked (private windows, site-data settings),
+// in which case the key simply has to be typed again.
+const LICENSE_KEY_STORAGE = 'leaselens.licenseKey'
+
+export function loadLicenseKey(): string {
+  try {
+    return localStorage.getItem(LICENSE_KEY_STORAGE) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+export function saveLicenseKey(key: string): void {
+  try {
+    localStorage.setItem(LICENSE_KEY_STORAGE, key)
+  } catch {
+    // Not persisting is fine; the in-memory value still works for this session.
+  }
+}
+
+export async function startAnalysis(objectKey: string, licenseKey: string): Promise<string> {
   const res = await fetch(`${API_BASE_URL}/analyze`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ objectKey }),
+    body: JSON.stringify({ objectKey, licenseKey: licenseKey.trim() }),
   })
   if (!res.ok) {
     throw new ApiError((await safeErrorMessage(res)) ?? 'No pudimos analizar el contrato.')
@@ -88,7 +115,7 @@ export async function startAnalysis(objectKey: string): Promise<string> {
  * running and already paid for, so failed polls are tolerated and retried; only a run of
  * consecutive failures is treated as fatal.
  */
-export async function waitForAnalysis(jobId: string): Promise<AnalysisResult> {
+export async function waitForAnalysis(jobId: string): Promise<AnalysisOutcome> {
   const deadline = Date.now() + POLL_TIMEOUT_MS
   let consecutiveFailures = 0
 
@@ -120,7 +147,7 @@ export async function waitForAnalysis(jobId: string): Promise<AnalysisResult> {
     consecutiveFailures = 0
     const job = (await res.json()) as AnalysisJobStatus
     if (job.status === 'done') {
-      return job.result
+      return { result: job.result, remainingUses: job.remainingUses ?? null }
     }
     if (job.status === 'error') {
       throw new ApiError(job.error || 'No pudimos analizar el contrato.')

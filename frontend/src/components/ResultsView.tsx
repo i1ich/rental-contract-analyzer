@@ -5,9 +5,11 @@ import Disclaimer from './Disclaimer'
 interface ResultsViewProps {
   result: AnalysisResult
   onAnalyzeAnother: () => void
+  /** License balance after this analysis; null/undefined when unknown (e.g. sample data). */
+  remainingUses?: number | null
 }
 
-export default function ResultsView({ result, onAnalyzeAnother }: ResultsViewProps) {
+export default function ResultsView({ result, onAnalyzeAnother, remainingUses }: ResultsViewProps) {
   return (
     <div className="results-view">
       <section className="results-view__summary">
@@ -31,6 +33,14 @@ export default function ResultsView({ result, onAnalyzeAnother }: ResultsViewPro
       )}
 
       <Disclaimer />
+
+      {remainingUses != null && (
+        <p className="results-view__remaining">
+          {remainingUses === 0
+            ? 'Usaste todos los análisis de tu clave de acceso.'
+            : `Te quedan ${remainingUses} análisis con tu clave de acceso.`}
+        </p>
+      )}
 
       <button type="button" className="button button--secondary" onClick={onAnalyzeAnother}>
         Analizar otro contrato

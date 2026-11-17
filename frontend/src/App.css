@@ -50,6 +50,39 @@
   cursor: pointer;
 }
 
+/* Access key (T18) */
+
+.license {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+}
+
+.license__label {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.license__input {
+  padding: 0.6rem 0.75rem;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.5rem;
+}
+
+.license__input:focus {
+  outline: 2px solid #2563eb;
+  outline-offset: 1px;
+}
+
+.results-view__remaining {
+  margin: 0;
+  font-size: 0.875rem;
+  color: #475569;
+}
+
 /* Upload zone */
 
 .upload-zone-wrapper {

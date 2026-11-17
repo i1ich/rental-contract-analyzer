@@ -3,7 +3,16 @@ import UploadZone from './components/UploadZone'
 import ResultsView from './components/ResultsView'
 import Disclaimer from './components/Disclaimer'
 import TransferConsent from './components/TransferConsent'
-import { ApiError, requestUploadUrl, startAnalysis, uploadFile, waitForAnalysis } from './api'
+import LicenseKeyInput from './components/LicenseKeyInput'
+import {
+  ApiError,
+  loadLicenseKey,
+  requestUploadUrl,
+  saveLicenseKey,
+  startAnalysis,
+  uploadFile,
+  waitForAnalysis,
+} from './api'
 import type { AnalysisResult } from './types'
 import { MOCK_ANALYSIS_RESULT } from './mockData'
 import './App.css'
@@ -16,11 +25,21 @@ export default function App() {
   const [result, setResult] = useState<AnalysisResult | null>(null)
   // Consent to the cross-border transfer — see TransferConsent for why this gate exists.
   const [transferConsent, setTransferConsent] = useState(false)
+  // Usage-limited access key (T18). Unlike consent it persists across analyses — it is the
+  // user's credential, not a per-transfer act — so reset() leaves it alone.
+  const [licenseKey, setLicenseKey] = useState(loadLicenseKey)
+  const [remainingUses, setRemainingUses] = useState<number | null>(null)
+
+  function handleLicenseKeyChange(value: string) {
+    setLicenseKey(value)
+    saveLicenseKey(value)
+  }
 
   function reset() {
     setStage('idle')
     setErrorMessage(null)
     setResult(null)
+    setRemainingUses(null)
     // Cleared deliberately: consent is given per transfer, so analyzing another contract asks
     // again rather than carrying over the previous contract's answer.
     setTransferConsent(false)
@@ -36,10 +55,11 @@ export default function App() {
       setStage('analyzing')
       // Two steps rather than one: the API accepts the job and hands back an id, and the result
       // is collected by polling. See api.ts — a real analysis outlives API Gateway's 29s cap.
-      const jobId = await startAnalysis(objectKey)
+      const jobId = await startAnalysis(objectKey, licenseKey)
       const analysis = await waitForAnalysis(jobId)
 
-      setResult(analysis)
+      setResult(analysis.result)
+      setRemainingUses(analysis.remainingUses)
       setStage('done')
     } catch (error) {
       setErrorMessage(error instanceof ApiError ? error.message : 'Ocurrió un error inesperado. Probá de nuevo.')
@@ -56,11 +76,16 @@ export default function App() {
 
       {stage === 'idle' && (
         <>
+          <LicenseKeyInput value={licenseKey} onChange={handleLicenseKeyChange} />
           <TransferConsent checked={transferConsent} onChange={setTransferConsent} />
           <UploadZone
             onFileSelected={handleFileSelected}
-            disabled={!transferConsent}
-            disabledReason="Para poder analizar tu contrato necesitamos tu consentimiento: marcá la casilla de arriba."
+            disabled={!transferConsent || licenseKey.trim() === ''}
+            disabledReason={
+              licenseKey.trim() === ''
+                ? 'Ingresá tu clave de acceso para poder analizar un contrato.'
+                : 'Para poder analizar tu contrato necesitamos tu consentimiento: marcá la casilla de arriba.'
+            }
           />
           {import.meta.env.DEV && (
             <button type="button" className="button button--dev" onClick={() => { setResult(MOCK_ANALYSIS_RESULT); setStage('done') }}>
@@ -99,7 +124,7 @@ export default function App() {
         </div>
       )}
 
-      {stage === 'done' && result && <ResultsView result={result} onAnalyzeAnother={reset} />}
+      {stage === 'done' && result && <ResultsView result={result} onAnalyzeAnother={reset} remainingUses={remainingUses} />}
     </main>
   )
 }
