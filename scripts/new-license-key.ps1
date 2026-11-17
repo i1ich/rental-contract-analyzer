@@ -8,11 +8,20 @@
   Refuses to overwrite an existing key. Requires the AWS CLI with credentials for the
   account/region the stack is deployed to.
 
+  -Prefix is a human-readable label at the start of the key (def, clh55, ...); it identifies
+  whose key it is in logs (first 4 characters) but grants nothing by itself. -Model, if given,
+  is an OpenRouter model id stored on the license and used instead of the default model for
+  analyses run with this key.
+
 .EXAMPLE
   ./scripts/new-license-key.ps1 -Owner "friend" -Uses 300
+.EXAMPLE
+  ./scripts/new-license-key.ps1 -Owner "test haiku" -Prefix clh55 -Model anthropic/claude-haiku-5.5
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Owner,
+    [string]$Prefix = "ll",
+    [string]$Model = "",
     [int]$Uses = 300,
     [string]$Table = "leaselens-analyses",
     [string]$Region = "sa-east-1"
@@ -29,17 +38,21 @@ function New-Chunk([int]$length) {
     -join ($bytes | ForEach-Object { $alphabet[$_ % $alphabet.Length] })
 }
 
-$key = "LL-$(New-Chunk 8)-$(New-Chunk 8)"
+$key = "$($Prefix.ToLowerInvariant())_$(New-Chunk 8)-$(New-Chunk 8)"
 $now = (Get-Date).ToUniversalTime().ToString("o")
 
-$item = @{
-    contentHash   = @{ S = "license#$key" }
+# The backend upper-cases whatever a user types before looking it up, so the stored key must be
+# upper-case too; the lower-case prefix is only how the key is displayed and logged.
+$itemTable = @{
+    contentHash   = @{ S = "license#$($key.ToUpperInvariant())" }
     totalUses     = @{ N = "$Uses" }
     remainingUses = @{ N = "$Uses" }
     status        = @{ S = "active" }
     ownerLabel    = @{ S = $Owner }
     createdAt     = @{ S = $now }
-} | ConvertTo-Json -Depth 4 -Compress
+}
+if ($Model) { $itemTable.model = @{ S = $Model } }
+$item = $itemTable | ConvertTo-Json -Depth 4 -Compress
 
 # Through a file: PowerShell 5.1 mangles quotes when passing JSON to native executables.
 $tmp = New-TemporaryFile

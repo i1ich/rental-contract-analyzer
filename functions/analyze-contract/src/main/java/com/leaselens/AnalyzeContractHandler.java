@@ -122,27 +122,29 @@ public class AnalyzeContractHandler implements
         jobStore.createPending(jobId);
         workerInvoker.startAnalysis(jobId, request.getObjectKey().trim(), licenseKey);
 
-        Log.event("job_accepted", "objectKey", request.getObjectKey().trim());
+        Log.event("job_accepted", "objectKey", request.getObjectKey().trim(),
+                "keyPrefix", LicenseStore.keyPrefix(licenseKey));
         return jsonResponse(202, Map.of("jobId", jobId, "status", "pending"));
     }
 
     /** Returns the response that turns this key away, or {@code null} if it may proceed. */
     private APIGatewayProxyResponseEvent checkLicense(String licenseKey) {
+        String keyPrefix = LicenseStore.keyPrefix(licenseKey);
         if (licenseKey == null || licenseKey.isEmpty()) {
             Log.warn("license_rejected", "status", 401, "reason", "missing");
             return jsonResponse(401, Map.of("error", "Ingresá tu clave de acceso para analizar un contrato."));
         }
         LicenseStore.License license = licenseStore.find(licenseKey);
         if (license == null) {
-            Log.warn("license_rejected", "status", 403, "reason", "unknown");
+            Log.warn("license_rejected", "status", 403, "reason", "unknown", "keyPrefix", keyPrefix);
             return jsonResponse(403, Map.of("error", "La clave de acceso no es válida."));
         }
         if (license.status() == LicenseStore.Status.REVOKED) {
-            Log.warn("license_rejected", "status", 403, "reason", "revoked");
+            Log.warn("license_rejected", "status", 403, "reason", "revoked", "keyPrefix", keyPrefix);
             return jsonResponse(403, Map.of("error", "Esta clave de acceso ya no está activa."));
         }
         if (!license.isUsable()) {
-            Log.warn("license_rejected", "status", 403, "reason", "exhausted");
+            Log.warn("license_rejected", "status", 403, "reason", "exhausted", "keyPrefix", keyPrefix);
             return jsonResponse(403, Map.of("error", "Esta clave de acceso ya usó todos sus análisis."));
         }
         return null;

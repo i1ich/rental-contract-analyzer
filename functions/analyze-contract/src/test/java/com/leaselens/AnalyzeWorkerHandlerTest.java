@@ -243,6 +243,39 @@ class AnalyzeWorkerHandlerTest {
         assertEquals(0, licenses.find("LL-AAAA-BBBB").remainingUses());
     }
 
+    // ---- per-key model override ---------------------------------------------------------------
+
+    /** Records which model each call asked for, delegating the real work to the mock analyzer. */
+    private static class ModelRecordingService extends MockContractAnalysisService {
+        final java.util.List<String> models = new java.util.ArrayList<>();
+
+        @Override
+        public com.leaselens.model.AnalysisResult analyze(String contractText, String model) {
+            models.add(model);
+            return analyze(contractText);
+        }
+    }
+
+    @Test
+    void keyPinnedToAModelAnalyzesWithThatModelAndDoesNotShareTheDefaultCache() throws Exception {
+        String objectKey = "contracts/fixture-01.pdf";
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        new LicenseStore(db, TABLE).create("DEF_AAAA", 10, "default", null);
+        new LicenseStore(db, TABLE).create("CLH5_BBBB", 10, "haiku", "anthropic/claude-haiku-5.5");
+        ModelRecordingService service = new ModelRecordingService();
+
+        for (String[] run : new String[][] {{"job-1", "DEF_AAAA"}, {"job-2", "CLH5_BBBB"}, {"job-3", "CLH5_BBBB"}}) {
+            new AnalyzeWorkerHandler(new FakeExtractTextInvoker(Map.of(objectKey, fixture01)), db, service)
+                    .handleRequest(Map.of("jobId", run[0], "objectKey", objectKey, "licenseKey", run[1]), null);
+        }
+
+        // job-2 missed the default key's cache entry (own model, own entry); job-3 hit job-2's.
+        assertEquals(java.util.Arrays.asList(null, "anthropic/claude-haiku-5.5"), service.models);
+        AnalysisJobStore store = new AnalysisJobStore(db, TABLE);
+        assertTrue(MAPPER.readTree(store.get("job-2").resultJson()).get("cachedAt").isNull());
+        assertFalse(MAPPER.readTree(store.get("job-3").resultJson()).get("cachedAt").isNull());
+    }
+
     private static void assertFailedWith(FakeDynamoDbClient db, int expectedStatusCode) {
         AnalysisJobStore.Job job = new AnalysisJobStore(db, TABLE).get("job-1");
         assertNotNull(job, "worker must record the job outcome");

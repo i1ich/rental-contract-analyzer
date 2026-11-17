@@ -163,9 +163,15 @@ public class OpenRouterAnalysisService implements ContractAnalysisService {
 
     @Override
     public AnalysisResult analyze(String contractText) {
+        return analyze(contractText, null);
+    }
+
+    @Override
+    public AnalysisResult analyze(String contractText, String modelOverride) {
+        String model = modelOverride == null || modelOverride.isBlank() ? getModel() : modelOverride.trim();
         String requestBody;
         try {
-            requestBody = buildRequestBody(contractText);
+            requestBody = buildRequestBody(contractText, model);
         } catch (IOException e) {
             throw new RuntimeException("Failed to build OpenRouter request", e);
         }
@@ -201,7 +207,7 @@ public class OpenRouterAnalysisService implements ContractAnalysisService {
         Log.event("model_http_completed",
                 "status", response.statusCode(),
                 "durationMs", System.currentTimeMillis() - calledAt,
-                "model", getModel(),
+                "model", model,
                 // Body size, never body content: the response embeds quoted contract text.
                 "responseBytes", response.body() == null ? 0 : response.body().length());
 
@@ -299,7 +305,7 @@ public class OpenRouterAnalysisService implements ContractAnalysisService {
         }
     }
 
-    private String buildRequestBody(String contractText) throws IOException {
+    private String buildRequestBody(String contractText, String model) throws IOException {
         // OpenRouter speaks the OpenAI chat-completions shape: system prompt is its own
         // message (not a top-level field like Anthropic's Messages API).
         ObjectNode systemMessage = MAPPER.createObjectNode();
@@ -315,7 +321,7 @@ public class OpenRouterAnalysisService implements ContractAnalysisService {
         messages.add(userMessage);
 
         ObjectNode body = MAPPER.createObjectNode();
-        body.put("model", getModel());
+        body.put("model", model);
         body.put("max_tokens", MAX_TOKENS);
         body.set("messages", messages);
 

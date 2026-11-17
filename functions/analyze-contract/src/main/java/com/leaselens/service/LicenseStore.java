@@ -33,7 +33,7 @@ public class LicenseStore {
     public enum Status { ACTIVE, EXHAUSTED, REVOKED }
 
     /** Immutable snapshot of a license record. */
-    public record License(int totalUses, int remainingUses, Status status) {
+    public record License(int totalUses, int remainingUses, Status status, String model) {
         /** A key can start a new analysis only if it is active and has uses left. */
         public boolean isUsable() {
             return status == Status.ACTIVE && remainingUses > 0;
@@ -46,6 +46,17 @@ public class LicenseStore {
     public LicenseStore(DynamoDbClient dynamoDb, String tableName) {
         this.dynamoDb = dynamoDb;
         this.tableName = tableName;
+    }
+
+    /**
+     * The first four characters of a key, lower-cased as the key was issued ({@code def_},
+     * {@code clh5}, ...). Safe to log: it is the issuing prefix, not the secret part, and it is
+     * what makes a log line attributable to "whose key" without exposing the key itself.
+     */
+    public static String keyPrefix(String key) {
+        String normalized = normalize(key);
+        if (normalized == null || normalized.isEmpty()) return null;
+        return normalized.substring(0, Math.min(4, normalized.length())).toLowerCase(Locale.ROOT);
     }
 
     /** Keys are generated upper-case; be forgiving about whitespace and case when users retype them. */
@@ -71,7 +82,8 @@ public class LicenseStore {
         return new License(
                 Integer.parseInt(item.get("totalUses").n()),
                 Integer.parseInt(item.get("remainingUses").n()),
-                status);
+                status,
+                item.get("model") == null ? null : item.get("model").s());
     }
 
     /**
@@ -102,8 +114,18 @@ public class LicenseStore {
         }
     }
 
-    /** Creates a new active license. Fails if the key already exists, so a key is never overwritten. */
+    /** Creates a new active license on the default model. */
     public void create(String key, int totalUses, String ownerLabel) {
+        create(key, totalUses, ownerLabel, null);
+    }
+
+    /**
+     * Creates a new active license. Fails if the key already exists, so a key is never
+     * overwritten. {@code model} is an OpenRouter model id that overrides the configured default
+     * for analyses run with this key (for trying weaker/cheaper models), or {@code null}.
+     * The model lives on the record, never derived from the key's text: a prefix is only a label.
+     */
+    public void create(String key, int totalUses, String ownerLabel, String model) {
         requireTable();
         Map<String, AttributeValue> item = new HashMap<>(partitionKey(key));
         item.put("totalUses", number(totalUses));
@@ -111,6 +133,9 @@ public class LicenseStore {
         item.put("status", AttributeValue.builder().s("active").build());
         item.put("ownerLabel", AttributeValue.builder().s(ownerLabel == null ? "" : ownerLabel).build());
         item.put("createdAt", AttributeValue.builder().s(Instant.now().toString()).build());
+        if (model != null && !model.isBlank()) {
+            item.put("model", AttributeValue.builder().s(model.trim()).build());
+        }
         dynamoDb.putItem(PutItemRequest.builder()
                 .tableName(tableName)
                 .item(item)

@@ -37,6 +37,25 @@ class LicenseStoreTest {
     }
 
     @Test
+    void keyPrefixIsTheFirstFourCharactersInTheIssuedCase() {
+        assertEquals("def_", LicenseStore.keyPrefix("DEF_ABCD1234"));
+        assertEquals("clh5", LicenseStore.keyPrefix(" clh55_abcd1234 "));
+        assertEquals("gpt5", LicenseStore.keyPrefix("gpt56l_abcd1234"));
+        assertNull(LicenseStore.keyPrefix(null));
+        assertNull(LicenseStore.keyPrefix("  "));
+    }
+
+    @Test
+    void modelIsStoredOnTheLicenseAndAbsentByDefault() {
+        LicenseStore store = new LicenseStore(new FakeDynamoDbClient(), TABLE);
+        store.create("DEF_AAAA", 5, "default");
+        store.create("CLH5_BBBB", 5, "haiku", "anthropic/claude-haiku-5.5");
+
+        assertNull(store.find("DEF_AAAA").model());
+        assertEquals("anthropic/claude-haiku-5.5", store.find("clh5_bbbb").model());
+    }
+
+    @Test
     void consumeOneDecrementsAndReportsWhatIsLeft() {
         LicenseStore store = new LicenseStore(new FakeDynamoDbClient(), TABLE);
         store.create("LL-AAAA-BBBB", 3, "friend");

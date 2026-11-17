@@ -20,9 +20,9 @@ export default function LicenseKeyInput({ value, onChange }: LicenseKeyInputProp
         className="license__input"
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        placeholder="LL-XXXXXXXX-XXXXXXXX"
+        placeholder="Pegá tu clave acá"
         autoComplete="off"
-        autoCapitalize="characters"
+        autoCapitalize="none"
         spellCheck={false}
       />
     </div>

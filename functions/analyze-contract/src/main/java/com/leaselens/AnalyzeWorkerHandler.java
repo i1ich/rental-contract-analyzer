@@ -107,7 +107,21 @@ public class AnalyzeWorkerHandler implements RequestHandler<Map<String, Object>,
         // The same id the API handler stamps its lines with: one analysis is one query.
         Log.setCorrelationId(jobId);
         long startedAt = System.currentTimeMillis();
-        Log.event("analysis_started", "objectKey", objectKey);
+        String keyPrefix = LicenseStore.keyPrefix(licenseKey);
+        // Which key asked, and for which model, is what makes a test run on a non-default model
+        // attributable. The prefix is the issuing label only — never the secret part of the key.
+        String model = null;
+        if (licenseKey != null) {
+            try {
+                LicenseStore.License license = licenseStore.find(licenseKey);
+                model = license == null ? null : license.model();
+            } catch (Exception e) {
+                // A lookup failure must not fail the analysis: fall back to the default model.
+                Log.warn("license_model_lookup_failed", "keyPrefix", keyPrefix);
+            }
+        }
+        Log.event("analysis_started", "objectKey", objectKey, "keyPrefix", keyPrefix,
+                "model", model == null ? "default" : model);
 
         try {
             if (objectKey == null || objectKey.isBlank()) {
@@ -117,7 +131,7 @@ public class AnalyzeWorkerHandler implements RequestHandler<Map<String, Object>,
                 return "failed";
             }
 
-            AnalysisResult result = analyze(objectKey.trim());
+            AnalysisResult result = analyze(objectKey.trim(), model);
             // T18: the one place a license use is spent — after success, never on acceptance or
             // failure, so a model error or timeout costs the user nothing. A cache hit still
             // counts: the user got a result. The conditional update inside consumeOne is what
@@ -139,6 +153,7 @@ public class AnalyzeWorkerHandler implements RequestHandler<Map<String, Object>,
             Log.event("analysis_completed",
                     "durationMs", System.currentTimeMillis() - startedAt,
                     "cacheHit", result.getCachedAt() != null,
+                    "keyPrefix", keyPrefix,
                     "licenseRemaining", remainingUses,
                     "findings", result.getFindings() == null ? 0 : result.getFindings().size());
             return "done";
@@ -169,7 +184,7 @@ public class AnalyzeWorkerHandler implements RequestHandler<Map<String, Object>,
         }
     }
 
-    private AnalysisResult analyze(String objectKey) {
+    private AnalysisResult analyze(String objectKey, String model) {
         // extract-text already falls back to vision-model OCR (T6) when there's no native text
         // layer, so "text too short" is the single signal here for "couldn't get usable text" —
         // whether that's because it's not a contract, a blank page, or OCR came up empty on a
@@ -200,7 +215,10 @@ public class AnalyzeWorkerHandler implements RequestHandler<Map<String, Object>,
             contractText = contractText.substring(0, MAX_CONTRACT_TEXT_LENGTH);
         }
 
-        String contentHash = sha256Hex(contractText);
+        // A key pinned to a specific model must not be served another model's cached analysis —
+        // that would defeat the point of testing it — so the model is part of the cache key.
+        // The default model keeps the plain text hash, leaving existing cache entries valid.
+        String contentHash = sha256Hex(model == null ? contractText : model + "\n" + contractText);
 
         long cacheStartedAt = System.currentTimeMillis();
         AnalysisResult cached = loadFromCache(contentHash);
@@ -212,7 +230,7 @@ public class AnalyzeWorkerHandler implements RequestHandler<Map<String, Object>,
         }
 
         long modelStartedAt = System.currentTimeMillis();
-        AnalysisResult result = analysisService.analyze(contractText);
+        AnalysisResult result = analysisService.analyze(contractText, model);
         // The dominant cost of a cache miss, and the number the async rewrite exists because of:
         // this is what has to stay well clear of the Lambda timeout.
         Log.event("analysis_model_completed",

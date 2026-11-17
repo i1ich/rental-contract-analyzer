@@ -11,4 +11,12 @@ public interface ContractAnalysisService {
      * @throws ServiceException if the underlying analysis call fails or returns unparseable output
      */
     AnalysisResult analyze(String contractText);
+
+    /**
+     * As {@link #analyze(String)}, but on a specific model instead of the configured default
+     * ({@code null} means the default). Implementations that have no notion of a model ignore it.
+     */
+    default AnalysisResult analyze(String contractText, String model) {
+        return analyze(contractText);
+    }
 }
