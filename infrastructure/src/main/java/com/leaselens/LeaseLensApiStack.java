@@ -177,7 +177,11 @@ public class LeaseLensApiStack extends Stack {
                 .timeout(Duration.seconds(30))
                 .environment(Map.of(
                         "TABLE_NAME", storageStack.getAnalysesTable().getTableName(),
-                        "ANALYZE_WORKER_FUNCTION_NAME", analyzeWorkerFn.getFunctionName()
+                        "ANALYZE_WORKER_FUNCTION_NAME", analyzeWorkerFn.getFunctionName(),
+                        // T18: POST /analyze requires a usage-limited license key (see
+                        // scripts/new-license-key.ps1). The worker needs no flag — it charges
+                        // whatever key the API handler validated and handed over.
+                        "LICENSE_REQUIRED", "true"
                 ))
                 .build();
 
