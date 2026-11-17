@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.leaselens.service.AnalysisJobStore;
 import com.leaselens.service.AnalysisWorkerInvoker;
+import com.leaselens.service.LicenseStore;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -31,11 +32,13 @@ class AnalyzeContractHandlerTest {
     private static class RecordingWorkerInvoker implements AnalysisWorkerInvoker {
         final List<String> startedJobIds = new ArrayList<>();
         final List<String> startedObjectKeys = new ArrayList<>();
+        final List<String> startedLicenseKeys = new ArrayList<>();
 
         @Override
-        public void startAnalysis(String jobId, String objectKey) {
+        public void startAnalysis(String jobId, String objectKey, String licenseKey) {
             startedJobIds.add(jobId);
             startedObjectKeys.add(objectKey);
+            startedLicenseKeys.add(licenseKey);
         }
     }
 
@@ -146,6 +149,96 @@ class AnalyzeContractHandlerTest {
 
         assertEquals(400, response.getStatusCode());
         assertTrue(worker.startedJobIds.isEmpty(), "no worker should be started for an invalid request");
+    }
+
+    // ---- T18 license gate -------------------------------------------------------------------
+
+    private static APIGatewayProxyRequestEvent postWithLicense(String licenseKey) throws Exception {
+        Map<String, String> body = new java.util.HashMap<>();
+        body.put("objectKey", "contracts/fixture-01.pdf");
+        if (licenseKey != null) {
+            body.put("licenseKey", licenseKey);
+        }
+        return postWith(MAPPER.writeValueAsString(body));
+    }
+
+    private static AnalyzeContractHandler licensedHandler(FakeDynamoDbClient db, RecordingWorkerInvoker worker) {
+        return new AnalyzeContractHandler(db, worker, true);
+    }
+
+    @Test
+    void validKeyStartsTheJobAndIsHandedToTheWorkerWithoutBeingCharged() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        new LicenseStore(db, TABLE).create("LL-AAAA-BBBB", 300, "friend");
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+
+        // Typed sloppily on purpose: the key is normalized before lookup and before the handoff.
+        APIGatewayProxyResponseEvent response =
+                licensedHandler(db, worker).handleRequest(postWithLicense("  ll-aaaa-bbbb "), null);
+
+        assertEquals(202, response.getStatusCode());
+        assertEquals(List.of("LL-AAAA-BBBB"), worker.startedLicenseKeys);
+        assertEquals(300, new LicenseStore(db, TABLE).find("LL-AAAA-BBBB").remainingUses(),
+                "accepting a job must not spend a use — only a finished analysis does");
+    }
+
+    @Test
+    void missingKeyIsRejectedWith401AndNothingStarts() throws Exception {
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+        APIGatewayProxyResponseEvent response =
+                licensedHandler(new FakeDynamoDbClient(), worker).handleRequest(postWithLicense(null), null);
+
+        assertEquals(401, response.getStatusCode());
+        assertTrue(worker.startedJobIds.isEmpty());
+    }
+
+    @Test
+    void unknownKeyIsRejectedWith403() throws Exception {
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+        APIGatewayProxyResponseEvent response =
+                licensedHandler(new FakeDynamoDbClient(), worker).handleRequest(postWithLicense("LL-NOPE"), null);
+
+        assertEquals(403, response.getStatusCode());
+        assertTrue(worker.startedJobIds.isEmpty());
+    }
+
+    @Test
+    void exhaustedKeyIsRejectedWith403() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        LicenseStore licenses = new LicenseStore(db, TABLE);
+        licenses.create("LL-AAAA-BBBB", 1, "friend");
+        licenses.consumeOne("LL-AAAA-BBBB");
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+
+        APIGatewayProxyResponseEvent response =
+                licensedHandler(db, worker).handleRequest(postWithLicense("LL-AAAA-BBBB"), null);
+
+        assertEquals(403, response.getStatusCode());
+        assertTrue(response.getBody().contains("todos sus análisis"));
+        assertTrue(worker.startedJobIds.isEmpty());
+    }
+
+    @Test
+    void keyIsNotRequiredWhenLicensingIsOff() throws Exception {
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+        APIGatewayProxyResponseEvent response =
+                new AnalyzeContractHandler(new FakeDynamoDbClient(), worker, false)
+                        .handleRequest(postWithLicense(null), null);
+
+        assertEquals(202, response.getStatusCode());
+        assertEquals(java.util.Collections.singletonList(null), worker.startedLicenseKeys);
+    }
+
+    @Test
+    void statusIncludesRemainingUsesWhenTheJobWasCharged() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        new AnalysisJobStore(db, TABLE).markDone("job-1",
+                "{\"summary\":\"resumen\",\"findings\":[],\"cachedAt\":null}", 283);
+
+        APIGatewayProxyResponseEvent status = new AnalyzeContractHandler(db, new RecordingWorkerInvoker())
+                .handleRequest(getStatusOf("job-1"), null);
+
+        assertEquals(283, MAPPER.readTree(status.getBody()).get("remainingUses").asInt());
     }
 
     @Test

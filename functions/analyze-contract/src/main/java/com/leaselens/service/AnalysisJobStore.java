@@ -40,7 +40,13 @@ public class AnalysisJobStore {
     public enum Status { PENDING, DONE, FAILED }
 
     /** Immutable snapshot of a job record as read back from DynamoDB. */
-    public record Job(Status status, String resultJson, String errorMessage, int errorStatusCode) {
+    /**
+     * {@code remainingUses} is the license balance after this job was charged, or {@code null}
+     * when no license was involved — carried on the job so the status poll can show it without a
+     * second lookup.
+     */
+    public record Job(Status status, String resultJson, String errorMessage, int errorStatusCode,
+                      Integer remainingUses) {
         public boolean isPending() {
             return status == Status.PENDING;
         }
@@ -56,12 +62,17 @@ public class AnalysisJobStore {
 
     /** Records a newly accepted job so the very first status poll finds something to report. */
     public void createPending(String jobId) {
-        put(jobId, Status.PENDING, null, null, 0);
+        put(jobId, Status.PENDING, null, null, 0, null);
     }
 
     /** Stores the finished analysis, as already-serialized JSON. */
     public void markDone(String jobId, String resultJson) {
-        put(jobId, Status.DONE, resultJson, null, 0);
+        markDone(jobId, resultJson, null);
+    }
+
+    /** As above, also recording the license balance left after charging this analysis. */
+    public void markDone(String jobId, String resultJson, Integer remainingUses) {
+        put(jobId, Status.DONE, resultJson, null, 0, remainingUses);
     }
 
     /**
@@ -71,7 +82,7 @@ public class AnalysisJobStore {
      * {@code message} must never contain contract text — only what was already safe to return.
      */
     public void markFailed(String jobId, int statusCode, String message) {
-        put(jobId, Status.FAILED, null, message, statusCode);
+        put(jobId, Status.FAILED, null, message, statusCode, null);
     }
 
     /** Returns the job, or {@code null} if it does not exist or has expired. */
@@ -100,14 +111,17 @@ public class AnalysisJobStore {
         AttributeValue resultAttr = item.get("resultJson");
         AttributeValue errorAttr = item.get("errorMessage");
         AttributeValue errorCodeAttr = item.get("errorStatusCode");
+        AttributeValue remainingAttr = item.get("remainingUses");
         return new Job(
                 Status.valueOf(statusAttr.s()),
                 resultAttr == null ? null : resultAttr.s(),
                 errorAttr == null ? null : errorAttr.s(),
-                errorCodeAttr == null ? 0 : Integer.parseInt(errorCodeAttr.n()));
+                errorCodeAttr == null ? 0 : Integer.parseInt(errorCodeAttr.n()),
+                remainingAttr == null ? null : Integer.valueOf(remainingAttr.n()));
     }
 
-    private void put(String jobId, Status status, String resultJson, String errorMessage, int errorStatusCode) {
+    private void put(String jobId, Status status, String resultJson, String errorMessage,
+                     int errorStatusCode, Integer remainingUses) {
         requireTable();
         long ttlEpoch = Instant.now().plus(TTL_HOURS, ChronoUnit.HOURS).getEpochSecond();
 
@@ -123,6 +137,10 @@ public class AnalysisJobStore {
         }
         if (errorStatusCode > 0) {
             item.put("errorStatusCode", AttributeValue.builder().n(String.valueOf(errorStatusCode)).build());
+        }
+
+        if (remainingUses != null) {
+            item.put("remainingUses", AttributeValue.builder().n(String.valueOf(remainingUses)).build());
         }
 
         dynamoDb.putItem(PutItemRequest.builder().tableName(tableName).item(item).build());

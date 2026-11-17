@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.leaselens.model.AnalyzeContractRequest;
 import com.leaselens.service.AnalysisJobStore;
 import com.leaselens.service.AnalysisWorkerInvoker;
+import com.leaselens.service.LicenseStore;
 import com.leaselens.service.LambdaAnalysisWorkerInvoker;
 import com.leaselens.service.ServiceException;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -44,16 +45,30 @@ public class AnalyzeContractHandler implements
 
     private final AnalysisJobStore jobStore;
     private final AnalysisWorkerInvoker workerInvoker;
+    private final LicenseStore licenseStore;
+    private final boolean licenseRequired;
 
     /** No-arg constructor used by the Lambda runtime: wires up real AWS clients. */
     public AnalyzeContractHandler() {
         this(DynamoDbClient.create(), new LambdaAnalysisWorkerInvoker());
     }
 
-    /** Package-private constructor for tests: allows injecting fakes for all AWS-touching seams. */
+    /**
+     * Package-private constructor for tests: allows injecting fakes for all AWS-touching seams.
+     * License enforcement follows the {@code LICENSE_REQUIRED} environment variable (off unless it
+     * is {@code "true"}), so the flow keeps working unchanged wherever no keys are issued.
+     */
     AnalyzeContractHandler(DynamoDbClient dynamoDb, AnalysisWorkerInvoker workerInvoker) {
-        this.jobStore = new AnalysisJobStore(dynamoDb, System.getenv("TABLE_NAME"));
+        this(dynamoDb, workerInvoker, "true".equalsIgnoreCase(System.getenv("LICENSE_REQUIRED")));
+    }
+
+    AnalyzeContractHandler(DynamoDbClient dynamoDb, AnalysisWorkerInvoker workerInvoker,
+                           boolean licenseRequired) {
+        String tableName = System.getenv("TABLE_NAME");
+        this.jobStore = new AnalysisJobStore(dynamoDb, tableName);
+        this.licenseStore = new LicenseStore(dynamoDb, tableName);
         this.workerInvoker = workerInvoker;
+        this.licenseRequired = licenseRequired;
     }
 
     @Override
@@ -87,6 +102,17 @@ public class AnalyzeContractHandler implements
             return jsonResponse(400, Map.of("error", "objectKey is required"));
         }
 
+        // T18 gate: one cheap read, before any job record, OCR or LLM spend. Nothing is charged
+        // here — the worker spends a use only once the analysis has actually succeeded.
+        String licenseKey = null;
+        if (licenseRequired) {
+            licenseKey = LicenseStore.normalize(request.getLicenseKey());
+            APIGatewayProxyResponseEvent rejection = checkLicense(licenseKey);
+            if (rejection != null) {
+                return rejection;
+            }
+        }
+
         String jobId = UUID.randomUUID().toString();
         // From here on every line of this invocation carries the jobId, which is also what the
         // worker Lambda stamps its own lines with — the two log groups join on this field.
@@ -94,10 +120,32 @@ public class AnalyzeContractHandler implements
         // Written before the invoke so a status poll that races ahead of the worker finds PENDING
         // rather than a 404 that the client would reasonably read as "this job never existed".
         jobStore.createPending(jobId);
-        workerInvoker.startAnalysis(jobId, request.getObjectKey().trim());
+        workerInvoker.startAnalysis(jobId, request.getObjectKey().trim(), licenseKey);
 
         Log.event("job_accepted", "objectKey", request.getObjectKey().trim());
         return jsonResponse(202, Map.of("jobId", jobId, "status", "pending"));
+    }
+
+    /** Returns the response that turns this key away, or {@code null} if it may proceed. */
+    private APIGatewayProxyResponseEvent checkLicense(String licenseKey) {
+        if (licenseKey == null || licenseKey.isEmpty()) {
+            Log.warn("license_rejected", "status", 401, "reason", "missing");
+            return jsonResponse(401, Map.of("error", "Ingresá tu clave de acceso para analizar un contrato."));
+        }
+        LicenseStore.License license = licenseStore.find(licenseKey);
+        if (license == null) {
+            Log.warn("license_rejected", "status", 403, "reason", "unknown");
+            return jsonResponse(403, Map.of("error", "La clave de acceso no es válida."));
+        }
+        if (license.status() == LicenseStore.Status.REVOKED) {
+            Log.warn("license_rejected", "status", 403, "reason", "revoked");
+            return jsonResponse(403, Map.of("error", "Esta clave de acceso ya no está activa."));
+        }
+        if (!license.isUsable()) {
+            Log.warn("license_rejected", "status", 403, "reason", "exhausted");
+            return jsonResponse(403, Map.of("error", "Esta clave de acceso ya usó todos sus análisis."));
+        }
+        return null;
     }
 
     /** {@code GET /analyze/{jobId}} — report progress, the result, or the recorded failure. */
@@ -145,7 +193,9 @@ public class AnalyzeContractHandler implements
         // The stored result is already-serialized JSON; splice it in as a raw value rather than
         // deserializing to AnalysisResult and back, which would be pure overhead and one more
         // place for the shape to drift.
-        String body = "{\"status\":\"done\",\"result\":" + job.resultJson() + "}";
+        String remaining = job.remainingUses() == null
+                ? "" : ",\"remainingUses\":" + job.remainingUses();
+        String body = "{\"status\":\"done\",\"result\":" + job.resultJson() + remaining + "}";
         return new APIGatewayProxyResponseEvent()
                 .withStatusCode(200)
                 .withHeaders(corsHeaders())

@@ -9,6 +9,7 @@ import com.leaselens.service.ContractAnalysisService;
 import com.leaselens.service.ExtractTextInvoker;
 import com.leaselens.service.ExtractTextResult;
 import com.leaselens.service.LambdaExtractTextInvoker;
+import com.leaselens.service.LicenseStore;
 import com.leaselens.service.OpenRouterAnalysisService;
 import com.leaselens.service.ServiceException;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -69,6 +70,7 @@ public class AnalyzeWorkerHandler implements RequestHandler<Map<String, Object>,
     private final DynamoDbClient dynamoDb;
     private final ContractAnalysisService analysisService;
     private final AnalysisJobStore jobStore;
+    private final LicenseStore licenseStore;
 
     /** No-arg constructor used by the Lambda runtime: wires up real AWS clients. */
     public AnalyzeWorkerHandler() {
@@ -84,12 +86,15 @@ public class AnalyzeWorkerHandler implements RequestHandler<Map<String, Object>,
         this.dynamoDb = dynamoDb;
         this.analysisService = analysisService;
         this.jobStore = new AnalysisJobStore(dynamoDb, this.tableName);
+        this.licenseStore = new LicenseStore(dynamoDb, this.tableName);
     }
 
     @Override
     public String handleRequest(Map<String, Object> event, Context context) {
         String jobId = stringField(event, "jobId");
         String objectKey = stringField(event, "objectKey");
+        // Present only when the API handler enforced licensing and already validated the key.
+        String licenseKey = stringField(event, "licenseKey");
 
         // Lambda reuses threads across invocations, so never inherit the previous job's id.
         Log.clearCorrelationId();
@@ -113,12 +118,28 @@ public class AnalyzeWorkerHandler implements RequestHandler<Map<String, Object>,
             }
 
             AnalysisResult result = analyze(objectKey.trim());
-            jobStore.markDone(jobId, MAPPER.writeValueAsString(result));
+            // T18: the one place a license use is spent — after success, never on acceptance or
+            // failure, so a model error or timeout costs the user nothing. A cache hit still
+            // counts: the user got a result. The conditional update inside consumeOne is what
+            // keeps two jobs finishing at once from overdrawing the last use.
+            Integer remainingUses = null;
+            if (licenseKey != null) {
+                int left = licenseStore.consumeOne(licenseKey);
+                if (left < 0) {
+                    Log.warn("analysis_failed", "status", 403, "reason", "license_exhausted",
+                            "durationMs", System.currentTimeMillis() - startedAt);
+                    jobStore.markFailed(jobId, 403, "Esta clave de acceso ya usó todos sus análisis.");
+                    return "failed";
+                }
+                remainingUses = left;
+            }
+            jobStore.markDone(jobId, MAPPER.writeValueAsString(result), remainingUses);
             // cachedAt is set only when the result came back from the cache (the fresh path
             // explicitly nulls it), so it doubles as the cache-hit flag without new state.
             Log.event("analysis_completed",
                     "durationMs", System.currentTimeMillis() - startedAt,
                     "cacheHit", result.getCachedAt() != null,
+                    "licenseRemaining", remainingUses,
                     "findings", result.getFindings() == null ? 0 : result.getFindings().size());
             return "done";
         } catch (UnusableTextException e) {

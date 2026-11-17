@@ -3,6 +3,7 @@ package com.leaselens;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.leaselens.service.AnalysisJobStore;
+import com.leaselens.service.LicenseStore;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -168,6 +169,78 @@ class AnalyzeWorkerHandlerTest {
         // The user-facing message must not carry the internal failure detail.
         assertFalse(job.errorMessage().contains("upstream exploded"));
         assertNull(job.resultJson());
+    }
+
+    // ---- T18: a license use is spent only by a successful analysis ---------------------------
+
+    @Test
+    void successfulAnalysisSpendsOneUseAndRecordsTheBalance() {
+        String objectKey = "contracts/fixture-01.pdf";
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        LicenseStore licenses = new LicenseStore(db, TABLE);
+        licenses.create("LL-AAAA-BBBB", 300, "friend");
+
+        new AnalyzeWorkerHandler(
+                new FakeExtractTextInvoker(Map.of(objectKey, fixture01)), db, new MockContractAnalysisService())
+                .handleRequest(Map.of("jobId", "job-1", "objectKey", objectKey, "licenseKey", "LL-AAAA-BBBB"), null);
+
+        assertEquals(299, licenses.find("LL-AAAA-BBBB").remainingUses());
+        AnalysisJobStore.Job job = new AnalysisJobStore(db, TABLE).get("job-1");
+        assertEquals(AnalysisJobStore.Status.DONE, job.status());
+        assertEquals(299, job.remainingUses());
+    }
+
+    @Test
+    void cacheHitStillSpendsAUse() {
+        String objectKey = "contracts/fixture-01.pdf";
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        LicenseStore licenses = new LicenseStore(db, TABLE);
+        licenses.create("LL-AAAA-BBBB", 300, "friend");
+
+        for (String jobId : new String[] {"job-1", "job-2"}) {
+            new AnalyzeWorkerHandler(
+                    new FakeExtractTextInvoker(Map.of(objectKey, fixture01)), db, new MockContractAnalysisService())
+                    .handleRequest(Map.of("jobId", jobId, "objectKey", objectKey, "licenseKey", "LL-AAAA-BBBB"), null);
+        }
+
+        assertEquals(298, licenses.find("LL-AAAA-BBBB").remainingUses());
+    }
+
+    @Test
+    void failedAnalysisDoesNotSpendAUse() {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        LicenseStore licenses = new LicenseStore(db, TABLE);
+        licenses.create("LL-AAAA-BBBB", 300, "friend");
+
+        new AnalyzeWorkerHandler(
+                new FakeExtractTextInvoker(Map.of(), false), db, new MockContractAnalysisService())
+                .handleRequest(Map.of("jobId", "job-1", "objectKey", "contracts/scanned.pdf",
+                        "licenseKey", "LL-AAAA-BBBB"), null);
+
+        assertFailedWith(db, 422);
+        assertEquals(300, licenses.find("LL-AAAA-BBBB").remainingUses());
+    }
+
+    /** Two jobs can be accepted against the last use; only the first to finish may take it. */
+    @Test
+    void jobFinishingAfterTheLastUseWasTakenFailsWith403() {
+        String objectKey = "contracts/fixture-01.pdf";
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        LicenseStore licenses = new LicenseStore(db, TABLE);
+        licenses.create("LL-AAAA-BBBB", 1, "friend");
+
+        for (String jobId : new String[] {"job-1", "job-2"}) {
+            new AnalyzeWorkerHandler(
+                    new FakeExtractTextInvoker(Map.of(objectKey, fixture01)), db, new MockContractAnalysisService())
+                    .handleRequest(Map.of("jobId", jobId, "objectKey", objectKey, "licenseKey", "LL-AAAA-BBBB"), null);
+        }
+
+        AnalysisJobStore store = new AnalysisJobStore(db, TABLE);
+        assertEquals(AnalysisJobStore.Status.DONE, store.get("job-1").status());
+        assertEquals(AnalysisJobStore.Status.FAILED, store.get("job-2").status());
+        assertEquals(403, store.get("job-2").errorStatusCode());
+        assertNull(store.get("job-2").resultJson());
+        assertEquals(0, licenses.find("LL-AAAA-BBBB").remainingUses());
     }
 
     private static void assertFailedWith(FakeDynamoDbClient db, int expectedStatusCode) {

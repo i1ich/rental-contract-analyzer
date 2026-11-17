@@ -12,6 +12,9 @@ public interface AnalysisWorkerInvoker {
      * Starts the analysis and returns without waiting for it. Implementations must not block on
      * the work completing — the whole point is that the caller can answer the HTTP request in
      * milliseconds.
+     *
+     * @param licenseKey the already-validated license key to charge once the analysis succeeds, or
+     *                   {@code null} when licensing is not enforced
      */
-    void startAnalysis(String jobId, String objectKey);
+    void startAnalysis(String jobId, String objectKey, String licenseKey);
 }

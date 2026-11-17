@@ -7,6 +7,7 @@ import software.amazon.awssdk.services.lambda.model.InvocationType;
 import software.amazon.awssdk.services.lambda.model.InvokeRequest;
 
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -27,14 +28,20 @@ public class LambdaAnalysisWorkerInvoker implements AnalysisWorkerInvoker {
     private final LambdaClient lambdaClient = LambdaClient.create();
 
     @Override
-    public void startAnalysis(String jobId, String objectKey) {
+    public void startAnalysis(String jobId, String objectKey, String licenseKey) {
         if (functionName == null || functionName.isBlank()) {
             throw new IllegalStateException("ANALYZE_WORKER_FUNCTION_NAME environment variable is not set");
         }
 
         String payload;
         try {
-            payload = MAPPER.writeValueAsString(Map.of("jobId", jobId, "objectKey", objectKey));
+            Map<String, String> fields = new LinkedHashMap<>();
+            fields.put("jobId", jobId);
+            fields.put("objectKey", objectKey);
+            if (licenseKey != null) {
+                fields.put("licenseKey", licenseKey);
+            }
+            payload = MAPPER.writeValueAsString(fields);
         } catch (Exception e) {
             throw new RuntimeException("Failed to build analyze-worker request payload", e);
         }
