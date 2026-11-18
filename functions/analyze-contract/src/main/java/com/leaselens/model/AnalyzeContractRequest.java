@@ -9,6 +9,25 @@ public class AnalyzeContractRequest {
 
     private String objectKey;
     private String licenseKey;
+    // Boolean (not boolean) so an absent field is distinguishable from an explicit false.
+    private Boolean disclaimerAccepted;
+    private String disclaimerVersion;
+
+    public Boolean getDisclaimerAccepted() {
+        return disclaimerAccepted;
+    }
+
+    public void setDisclaimerAccepted(Boolean disclaimerAccepted) {
+        this.disclaimerAccepted = disclaimerAccepted;
+    }
+
+    public String getDisclaimerVersion() {
+        return disclaimerVersion;
+    }
+
+    public void setDisclaimerVersion(String disclaimerVersion) {
+        this.disclaimerVersion = disclaimerVersion;
+    }
 
     public String getObjectKey() {
         return objectKey;

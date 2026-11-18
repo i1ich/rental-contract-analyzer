@@ -120,7 +120,8 @@ curl -X PUT "<uploadUrl from step 1>" \
 # 3. Start the analysis. Returns 202 immediately with a job id — it does NOT wait for the result.
 curl -X POST https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod/analyze \
   -H 'Content-Type: application/json' \
-  -d '{"objectKey": "<objectKey from step 1>"}'
+  -d '{"objectKey": "<objectKey from step 1>", "licenseKey": "<access key>",
+       "disclaimerAccepted": true, "disclaimerVersion": "<version in frontend/src/legal/disclaimer.json>"}'
 # => 202 {"jobId": "<uuid>", "status": "pending"}
 
 # 4. Poll until it settles (the frontend polls every 2s).
@@ -129,6 +130,30 @@ curl https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod/analyze/<jobId>
 #  | {"status":"done","result":{"summary":..., "findings":[...]}}
 #  | {"status":"error","errorStatusCode":422,"error":"..."}
 ```
+
+### Disclaimer gate (smoke-test on every deploy)
+
+`POST /analyze` refuses unless the request itself carries `disclaimerAccepted: true` and the
+`disclaimerVersion` currently in `frontend/src/legal/disclaimer.json` (enforced by
+`DisclaimerGate.CURRENT_VERSION`; per request, always on, checked before the license, any job
+record, OCR or LLM spend). A UI-only checkbox would be bypassable, so this is the real gate. After
+every backend deploy confirm it still holds — a deploy that breaks it silently re-opens the API:
+
+```sh
+# Must be 400 with {"code":"DISCLAIMER_NOT_ACCEPTED","currentVersion":"..."} — no job created.
+curl -s -w '
+%{http_code}
+' -X POST https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod/analyze   -H 'Content-Type: application/json' -d '{"objectKey": "uploads/none.pdf", "licenseKey": "x"}'
+# Same with "disclaimerAccepted": false, or a wrong "disclaimerVersion": also 400, same code.
+# With the current version and a bad key the disclaimer passes and the license gate answers 403.
+```
+
+Changing the text: edit `disclaimer.es.md`, bump `version` and `sha256` in `disclaimer.json` and
+`DisclaimerGate.CURRENT_VERSION`, then redeploy backend and frontend together (`DisclaimerGateTest`
+fails if any of the three disagree). Clients still on the old version get the 400 until reloaded.
+Acceptance is evidenced by the `job_accepted` log line (timestamp, `jobId`, `keyPrefix`,
+`disclaimerVersion`); it contains no IP and no contract content. The text is a draft and has not
+been reviewed by a lawyer, so the checkbox is a transparency/record measure, not legal protection.
 
 Analysis is asynchronous because it has to be: a real analysis takes ~80-92s on `claude-sonnet-5`
 and API Gateway caps a REST integration at a hard, unconfigurable 29s, so the earlier synchronous

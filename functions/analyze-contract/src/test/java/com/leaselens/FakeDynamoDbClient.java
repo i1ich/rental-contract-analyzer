@@ -23,6 +23,11 @@ public class FakeDynamoDbClient implements DynamoDbClient {
 
     private final Map<String, Map<String, AttributeValue>> store = new HashMap<>();
 
+    /** Keys of everything written so far; lets tests assert that a refused request wrote nothing. */
+    public java.util.Set<String> getItemKeysForTest() {
+        return store.keySet();
+    }
+
     @Override
     public GetItemResponse getItem(GetItemRequest request) {
         String key = request.key().get("contentHash").s();

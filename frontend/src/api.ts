@@ -1,4 +1,8 @@
 import type { AnalysisResult } from './types'
+import disclaimer from './legal/disclaimer.json'
+
+// Version of the disclaimer text shown to the user; the API only accepts the current one.
+const DISCLAIMER_VERSION: string = disclaimer.version
 
 // Set at build/dev time (e.g. .env.local: VITE_API_BASE_URL=https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod)
 // once the API is deployed (T9/T16). Empty string keeps requests same-origin, which will 404
@@ -96,7 +100,14 @@ export async function startAnalysis(objectKey: string, licenseKey: string): Prom
   const res = await fetch(`${API_BASE_URL}/analyze`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ objectKey, licenseKey: licenseKey.trim() }),
+    // The API refuses without these on every request; the caller only reaches this point after the
+    // user ticked the disclaimer checkbox (see DisclaimerAcceptance / App).
+    body: JSON.stringify({
+      objectKey,
+      licenseKey: licenseKey.trim(),
+      disclaimerAccepted: true,
+      disclaimerVersion: DISCLAIMER_VERSION,
+    }),
   })
   if (!res.ok) {
     throw new ApiError((await safeErrorMessage(res)) ?? 'No pudimos analizar el contrato.')

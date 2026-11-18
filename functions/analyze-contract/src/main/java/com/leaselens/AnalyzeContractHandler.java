@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.leaselens.model.AnalyzeContractRequest;
 import com.leaselens.service.AnalysisJobStore;
 import com.leaselens.service.AnalysisWorkerInvoker;
+import com.leaselens.service.DisclaimerGate;
 import com.leaselens.service.LicenseStore;
 import com.leaselens.service.LambdaAnalysisWorkerInvoker;
 import com.leaselens.service.ServiceException;
@@ -102,6 +103,20 @@ public class AnalyzeContractHandler implements
             return jsonResponse(400, Map.of("error", "objectKey is required"));
         }
 
+        // Disclaimer gate: the caller must state, in this very request, that it accepted the
+        // current disclaimer text. Always on (no env toggle) and checked before anything that
+        // costs money or touches the database.
+        if (!DisclaimerGate.isAccepted(request.getDisclaimerAccepted(), request.getDisclaimerVersion())) {
+            Log.warn("disclaimer_rejected", "status", 400,
+                    "sentVersion", request.getDisclaimerVersion(),
+                    "accepted", request.getDisclaimerAccepted());
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("error", "Para analizar un contrato tenés que leer y aceptar el aviso legal.");
+            body.put("code", DisclaimerGate.ERROR_CODE);
+            body.put("currentVersion", DisclaimerGate.CURRENT_VERSION);
+            return jsonResponse(400, body);
+        }
+
         // T18 gate: one cheap read, before any job record, OCR or LLM spend. Nothing is charged
         // here — the worker spends a use only once the analysis has actually succeeded.
         String licenseKey = null;
@@ -123,7 +138,10 @@ public class AnalyzeContractHandler implements
         workerInvoker.startAnalysis(jobId, request.getObjectKey().trim(), licenseKey);
 
         Log.event("job_accepted", "objectKey", request.getObjectKey().trim(),
-                "keyPrefix", LicenseStore.keyPrefix(licenseKey));
+                "keyPrefix", LicenseStore.keyPrefix(licenseKey),
+                // Evidence of acceptance: this line's timestamp + jobId (an anonymous id) + the
+                // version accepted. No IP, no contract content.
+                "disclaimerVersion", DisclaimerGate.CURRENT_VERSION);
         return jsonResponse(202, Map.of("jobId", jobId, "status", "pending"));
     }
 

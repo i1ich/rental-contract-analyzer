@@ -3,6 +3,7 @@ import UploadZone from './components/UploadZone'
 import ResultsView from './components/ResultsView'
 import Disclaimer from './components/Disclaimer'
 import TransferConsent from './components/TransferConsent'
+import DisclaimerAcceptance from './components/DisclaimerAcceptance'
 import LicenseKeyInput from './components/LicenseKeyInput'
 import {
   ApiError,
@@ -25,6 +26,9 @@ export default function App() {
   const [result, setResult] = useState<AnalysisResult | null>(null)
   // Consent to the cross-border transfer — see TransferConsent for why this gate exists.
   const [transferConsent, setTransferConsent] = useState(false)
+  // Acceptance of the full disclaimer / release of liability. Also per analysis and never
+  // pre-checked; the API independently refuses any request that does not carry it.
+  const [disclaimerAccepted, setDisclaimerAccepted] = useState(false)
   // Usage-limited access key (T18). Unlike consent it persists across analyses — it is the
   // user's credential, not a per-transfer act — so reset() leaves it alone.
   const [licenseKey, setLicenseKey] = useState(loadLicenseKey)
@@ -43,6 +47,7 @@ export default function App() {
     // Cleared deliberately: consent is given per transfer, so analyzing another contract asks
     // again rather than carrying over the previous contract's answer.
     setTransferConsent(false)
+    setDisclaimerAccepted(false)
   }
 
   async function handleFileSelected(file: File) {
@@ -77,14 +82,15 @@ export default function App() {
       {stage === 'idle' && (
         <>
           <LicenseKeyInput value={licenseKey} onChange={handleLicenseKeyChange} />
+          <DisclaimerAcceptance checked={disclaimerAccepted} onChange={setDisclaimerAccepted} />
           <TransferConsent checked={transferConsent} onChange={setTransferConsent} />
           <UploadZone
             onFileSelected={handleFileSelected}
-            disabled={!transferConsent || licenseKey.trim() === ''}
+            disabled={!disclaimerAccepted || !transferConsent || licenseKey.trim() === ''}
             disabledReason={
               licenseKey.trim() === ''
                 ? 'Ingresá tu clave de acceso para poder analizar un contrato.'
-                : 'Para poder analizar tu contrato necesitamos tu consentimiento: marcá la casilla de arriba.'
+                : 'Para poder analizar tu contrato necesitamos que aceptes el aviso legal y la transferencia: marcá las dos casillas de arriba.'
             }
           />
           {import.meta.env.DEV && (

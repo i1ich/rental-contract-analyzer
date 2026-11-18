@@ -64,6 +64,10 @@ without a redeploy.
 - Explicit **cross-border data transfer consent** gate before upload, on the basis of Uruguay's
   Ley 18.331 art. 23 (the LLM call leaves the country); copy is draft pending the legal review
 - Mandatory disclaimer: *"herramienta educativa, no es asesoramiento legal"*
+- **API-enforced disclaimer acceptance**: `POST /analyze` returns 400 `DISCLAIMER_NOT_ACCEPTED`
+  unless the request carries `disclaimerAccepted: true` and the current `disclaimerVersion`
+  (text + version + hash in `frontend/src/legal/`). The UI checkbox is unticked on every analysis.
+  Draft text, not yet lawyer-reviewed.
 
 ## Quality gate
 

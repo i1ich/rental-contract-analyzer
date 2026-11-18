@@ -5,6 +5,7 @@ import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyResponseEvent
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.leaselens.service.AnalysisJobStore;
+import com.leaselens.service.DisclaimerGate;
 import com.leaselens.service.AnalysisWorkerInvoker;
 import com.leaselens.service.LicenseStore;
 import org.junit.jupiter.api.Test;
@@ -49,6 +50,14 @@ class AnalyzeContractHandlerTest {
         return event;
     }
 
+    /** A well-formed request body that carries the disclaimer acceptance. */
+    private static String acceptedBody() throws Exception {
+        return MAPPER.writeValueAsString(Map.of(
+                "objectKey", "contracts/fixture-01.pdf",
+                "disclaimerAccepted", true,
+                "disclaimerVersion", DisclaimerGate.CURRENT_VERSION));
+    }
+
     private static APIGatewayProxyRequestEvent getStatusOf(String jobId) {
         APIGatewayProxyRequestEvent event = new APIGatewayProxyRequestEvent();
         event.setHttpMethod("GET");
@@ -63,7 +72,7 @@ class AnalyzeContractHandlerTest {
         AnalyzeContractHandler handler = new AnalyzeContractHandler(db, worker);
 
         APIGatewayProxyResponseEvent response = handler.handleRequest(
-                postWith(MAPPER.writeValueAsString(Map.of("objectKey", "contracts/fixture-01.pdf"))), null);
+                postWith(acceptedBody()), null);
 
         // 202, not 200: the analysis has been accepted, not performed. This is the whole point of
         // the redesign — a real analysis takes ~83-92s against API Gateway's hard 29s cap.
@@ -88,7 +97,7 @@ class AnalyzeContractHandlerTest {
         AnalyzeContractHandler handler = new AnalyzeContractHandler(db, new RecordingWorkerInvoker());
 
         APIGatewayProxyResponseEvent accepted = handler.handleRequest(
-                postWith(MAPPER.writeValueAsString(Map.of("objectKey", "contracts/fixture-01.pdf"))), null);
+                postWith(acceptedBody()), null);
         String jobId = MAPPER.readTree(accepted.getBody()).get("jobId").asText();
 
         APIGatewayProxyResponseEvent status = handler.handleRequest(getStatusOf(jobId), null);
@@ -154,8 +163,10 @@ class AnalyzeContractHandlerTest {
     // ---- T18 license gate -------------------------------------------------------------------
 
     private static APIGatewayProxyRequestEvent postWithLicense(String licenseKey) throws Exception {
-        Map<String, String> body = new java.util.HashMap<>();
+        Map<String, Object> body = new java.util.HashMap<>();
         body.put("objectKey", "contracts/fixture-01.pdf");
+        body.put("disclaimerAccepted", true);
+        body.put("disclaimerVersion", DisclaimerGate.CURRENT_VERSION);
         if (licenseKey != null) {
             body.put("licenseKey", licenseKey);
         }
@@ -239,6 +250,107 @@ class AnalyzeContractHandlerTest {
                 .handleRequest(getStatusOf("job-1"), null);
 
         assertEquals(283, MAPPER.readTree(status.getBody()).get("remainingUses").asInt());
+    }
+
+    // ---- Disclaimer gate --------------------------------------------------------------------
+
+    private static APIGatewayProxyRequestEvent postWithDisclaimer(Object accepted, String version) throws Exception {
+        Map<String, Object> body = new java.util.HashMap<>();
+        body.put("objectKey", "contracts/fixture-01.pdf");
+        if (accepted != null) {
+            body.put("disclaimerAccepted", accepted);
+        }
+        if (version != null) {
+            body.put("disclaimerVersion", version);
+        }
+        return postWith(MAPPER.writeValueAsString(body));
+    }
+
+    private void assertRefusedForDisclaimer(APIGatewayProxyResponseEvent response, RecordingWorkerInvoker worker,
+                                            FakeDynamoDbClient db) throws Exception {
+        assertEquals(400, response.getStatusCode());
+        JsonNode body = MAPPER.readTree(response.getBody());
+        assertEquals("DISCLAIMER_NOT_ACCEPTED", body.get("code").asText());
+        assertEquals(DisclaimerGate.CURRENT_VERSION, body.get("currentVersion").asText());
+        assertTrue(worker.startedJobIds.isEmpty(), "no job (and so no OCR / LLM call) without acceptance");
+        assertTrue(db.getItemKeysForTest().isEmpty(), "no job record may be written for a refused request");
+    }
+
+    @Test
+    void requestWithoutTheAcceptanceFieldsIsRefused() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+        // The bypass case: a direct API call (curl, script) that never saw the UI.
+        APIGatewayProxyResponseEvent response = new AnalyzeContractHandler(db, worker, false)
+                .handleRequest(postWithDisclaimer(null, null), null);
+        assertRefusedForDisclaimer(response, worker, db);
+    }
+
+    @Test
+    void explicitFalseIsRefused() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+        APIGatewayProxyResponseEvent response = new AnalyzeContractHandler(db, worker, false)
+                .handleRequest(postWithDisclaimer(false, DisclaimerGate.CURRENT_VERSION), null);
+        assertRefusedForDisclaimer(response, worker, db);
+    }
+
+    @Test
+    void acceptanceWithoutAVersionIsRefused() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+        APIGatewayProxyResponseEvent response = new AnalyzeContractHandler(db, worker, false)
+                .handleRequest(postWithDisclaimer(true, null), null);
+        assertRefusedForDisclaimer(response, worker, db);
+    }
+
+    @Test
+    void outdatedVersionIsRefusedAndTheBodyNamesTheCurrentOne() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+        APIGatewayProxyResponseEvent response = new AnalyzeContractHandler(db, worker, false)
+                .handleRequest(postWithDisclaimer(true, "1999-01-01.0"), null);
+        assertRefusedForDisclaimer(response, worker, db);
+    }
+
+    @Test
+    void stringTrueIsNotAnAcceptance() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+        // Jackson would coerce "true" to a Boolean; a boolean-typed contract is what we promise.
+        // Whatever it does, a non-boolean must never slip past as an acceptance by accident.
+        APIGatewayProxyResponseEvent response = new AnalyzeContractHandler(db, worker, false)
+                .handleRequest(postWithDisclaimer("no", DisclaimerGate.CURRENT_VERSION), null);
+        assertEquals(400, response.getStatusCode());
+        assertTrue(worker.startedJobIds.isEmpty());
+    }
+
+    @Test
+    void disclaimerIsCheckedBeforeTheLicenseSoARefusedRequestTouchesNothing() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        new LicenseStore(db, TABLE).create("LL-AAAA-BBBB", 300, "friend");
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+        Map<String, Object> body = new java.util.HashMap<>();
+        body.put("objectKey", "contracts/fixture-01.pdf");
+        body.put("licenseKey", "LL-AAAA-BBBB");
+
+        APIGatewayProxyResponseEvent response = licensedHandler(db, worker)
+                .handleRequest(postWith(MAPPER.writeValueAsString(body)), null);
+
+        assertEquals(400, response.getStatusCode());
+        assertTrue(worker.startedJobIds.isEmpty());
+        assertEquals(300, new LicenseStore(db, TABLE).find("LL-AAAA-BBBB").remainingUses());
+    }
+
+    @Test
+    void currentVersionAcceptanceTakesTheNormalFlow() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+        APIGatewayProxyResponseEvent response = new AnalyzeContractHandler(db, worker, false)
+                .handleRequest(postWithDisclaimer(true, DisclaimerGate.CURRENT_VERSION), null);
+
+        assertEquals(202, response.getStatusCode());
+        assertEquals(1, worker.startedJobIds.size());
     }
 
     @Test
