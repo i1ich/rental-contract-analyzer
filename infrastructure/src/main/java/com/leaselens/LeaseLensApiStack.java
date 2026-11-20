@@ -14,8 +14,8 @@ import java.util.Map;
 
 /**
  * Exposes the analysis pipeline over HTTP: {@code POST /upload-url} (presigned S3 PUT, T4),
- * {@code POST /analyze} (accept a job, T8/T9) and {@code GET /analyze/{jobId}} (poll for the
- * result).
+ * {@code POST /analyze} (accept a job, T8/T9), {@code GET /analyze/{jobId}} (poll for the
+ * result) and {@code POST /license-status} (remaining uses and expiry of a key).
  *
  * <p>Analysis is asynchronous because it has to be: API Gateway's REST integration timeout is a
  * hard, unconfigurable 29 seconds and a real analysis takes ~83-92s, so the synchronous version of
@@ -104,13 +104,19 @@ public class LeaseLensApiStack extends Stack {
                 .memorySize(512)
                 .timeout(Duration.seconds(10))
                 .environment(Map.of(
-                        "BUCKET_NAME", storageStack.getContractUploadsBucket().getBucketName()
+                        "BUCKET_NAME", storageStack.getContractUploadsBucket().getBucketName(),
+                        // Same gate as /analyze: no presigned URL without a valid license key and
+                        // an accepted disclaimer. Read-only table access (see grant below).
+                        "TABLE_NAME", storageStack.getAnalysesTable().getTableName(),
+                        "LICENSE_REQUIRED", "true"
                 ))
                 .build();
 
         // The presigned URL is signed with this Lambda's own credentials, so S3 checks this
         // grant (not the browser's) when the presigned PUT actually happens.
         storageStack.getContractUploadsBucket().grantPut(generateUploadUrlFn);
+        // Only reads license records; the use is charged by the worker, never here.
+        storageStack.getAnalysesTable().grantReadData(generateUploadUrlFn);
 
         // Lambda: analyze-worker — the actual analysis pipeline, never exposed via API Gateway.
         // Invoked asynchronously (InvocationType.EVENT) by the API handler below, which is the
@@ -212,6 +218,11 @@ public class LeaseLensApiStack extends Stack {
 
         Resource uploadUrlResource = api.getRoot().addResource("upload-url");
         uploadUrlResource.addMethod("POST", new LambdaIntegration(generateUploadUrlFn));
+
+        // Read-only key balance lookup; served by the analyze-contract Lambda, which already has
+        // the table access and LicenseStore.
+        api.getRoot().addResource("license-status")
+                .addMethod("POST", new LambdaIntegration(analyzeContractFn));
 
         Resource analyzeResource = api.getRoot().addResource("analyze");
         analyzeResource.addMethod("POST", new LambdaIntegration(analyzeContractFn));

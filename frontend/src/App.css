@@ -116,6 +116,50 @@
   outline-offset: 1px;
 }
 
+.license__row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.license__row .license__input {
+  flex: 1;
+  min-width: 0;
+}
+
+.license__check {
+  padding: 0.6rem 0.9rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.5rem;
+  background: #ffffff;
+  color: #1f2937;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.license__check:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.license__status {
+  margin: 0;
+  font-size: 0.875rem;
+  color: #475569;
+}
+
+.license__status--ok {
+  color: #166534;
+}
+
+.license__status--warn {
+  color: #b45309;
+}
+
+.license__status--bad {
+  color: #b91c1c;
+}
+
 .results-view__remaining {
   margin: 0;
   font-size: 0.875rem;

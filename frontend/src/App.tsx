@@ -54,7 +54,7 @@ export default function App() {
     setErrorMessage(null)
     try {
       setStage('uploading')
-      const { uploadUrl, objectKey, requiredContentType } = await requestUploadUrl(file.size)
+      const { uploadUrl, objectKey, requiredContentType } = await requestUploadUrl(file.size, licenseKey)
       await uploadFile(uploadUrl, requiredContentType, file)
 
       setStage('analyzing')

@@ -3,6 +3,8 @@ package com.leaselens;
 import com.leaselens.service.LicenseStore;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -80,5 +82,69 @@ class LicenseStoreTest {
     @Test
     void consumeOneOnAnUnknownKeyReportsNothingToSpend() {
         assertEquals(-1, new LicenseStore(new FakeDynamoDbClient(), TABLE).consumeOne("LL-NOPE"));
+    }
+
+    // ---- monthly expiry ---------------------------------------------------------------------
+
+    @Test
+    void nextExpiryIsTheNextFifteenthAtMidnightUtc() {
+        // The two examples from the todo note.
+        assertEquals(Instant.parse("2026-12-15T00:00:00Z"), LicenseStore.nextExpiry(Instant.parse("2026-11-18T09:30:00Z")));
+        assertEquals(Instant.parse("2026-11-15T00:00:00Z"), LicenseStore.nextExpiry(Instant.parse("2026-11-10T09:30:00Z")));
+        // Edges: first day of the month, the 14th, and the 15th itself (strictly after -> next month).
+        assertEquals(Instant.parse("2026-11-15T00:00:00Z"), LicenseStore.nextExpiry(Instant.parse("2026-11-01T00:00:00Z")));
+        assertEquals(Instant.parse("2026-11-15T00:00:00Z"), LicenseStore.nextExpiry(Instant.parse("2026-11-14T23:59:59Z")));
+        assertEquals(Instant.parse("2026-12-15T00:00:00Z"), LicenseStore.nextExpiry(Instant.parse("2026-11-15T00:00:00Z")));
+        // Year rollover.
+        assertEquals(Instant.parse("2027-01-15T00:00:00Z"), LicenseStore.nextExpiry(Instant.parse("2026-12-20T12:00:00Z")));
+    }
+
+    @Test
+    void aNewLicenseGetsTheNextFifteenthAsItsExpiry() {
+        LicenseStore store = new LicenseStore(new FakeDynamoDbClient(), TABLE);
+        Instant before = Instant.now();
+        store.create("LL-AAAA-BBBB", 300, "friend");
+
+        Instant expiresAt = store.find("LL-AAAA-BBBB").expiresAt();
+        assertEquals(15, expiresAt.atZone(java.time.ZoneOffset.UTC).getDayOfMonth());
+        assertTrue(expiresAt.isAfter(before));
+        assertEquals(LicenseStore.nextExpiry(before), expiresAt);
+    }
+
+    @Test
+    void aKeyIsUsableBeforeItsExpiryAndRejectedAfter() {
+        LicenseStore store = new LicenseStore(new FakeDynamoDbClient(), TABLE);
+        Instant expiry = Instant.parse("2026-12-15T00:00:00Z");
+        store.create("LL-AAAA-BBBB", 300, "friend", null, expiry);
+        LicenseStore.License license = store.find("LL-AAAA-BBBB");
+
+        assertTrue(license.isUsable(expiry.minusSeconds(1)));
+        assertFalse(license.isExpired(expiry.minusSeconds(1)));
+        assertFalse(license.isUsable(expiry), "valid strictly before expiresAt");
+        assertTrue(license.isExpired(expiry));
+        assertFalse(license.isUsable(expiry.plusSeconds(86_400)));
+        // Uses are untouched by expiry: the record still says what was left.
+        assertEquals(300, license.remainingUses());
+    }
+
+    @Test
+    void aRegeneratedKeyWorksAgainWhileTheOldOneStaysExpired() {
+        LicenseStore store = new LicenseStore(new FakeDynamoDbClient(), TABLE);
+        store.create("USR1_OLD", 300, "me", null, Instant.parse("2026-11-15T00:00:00Z"));
+        Instant afterTheFifteenth = Instant.parse("2026-11-18T12:00:00Z");
+        store.create("USR1_NEW", 300, "me", null, LicenseStore.nextExpiry(afterTheFifteenth));
+
+        assertFalse(store.find("USR1_OLD").isUsable(afterTheFifteenth));
+        assertTrue(store.find("USR1_NEW").isUsable(afterTheFifteenth));
+    }
+
+    @Test
+    void aLegacyRecordWithoutExpiresAtNeverExpires() {
+        LicenseStore store = new LicenseStore(new FakeDynamoDbClient(), TABLE);
+        store.create("LEGACY", 300, "me", null, null);
+
+        LicenseStore.License license = store.find("LEGACY");
+        assertNull(license.expiresAt());
+        assertTrue(license.isUsable(Instant.parse("2099-01-01T00:00:00Z")));
     }
 }

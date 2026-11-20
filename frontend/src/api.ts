@@ -22,11 +22,18 @@ interface UploadUrlResponse {
   expiresInSeconds: number
 }
 
-export async function requestUploadUrl(fileSizeBytes: number): Promise<UploadUrlResponse> {
+// The API refuses to issue an upload URL without a license key and the accepted disclaimer, exactly
+// like /analyze: the UI gate is a convenience, this is the enforcement.
+export async function requestUploadUrl(fileSizeBytes: number, licenseKey: string): Promise<UploadUrlResponse> {
   const res = await fetch(`${API_BASE_URL}/upload-url`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fileSizeBytes }),
+    body: JSON.stringify({
+      fileSizeBytes,
+      licenseKey: licenseKey.trim(),
+      disclaimerAccepted: true,
+      disclaimerVersion: DISCLAIMER_VERSION,
+    }),
   })
   if (!res.ok) {
     throw new ApiError((await safeErrorMessage(res)) ?? 'No pudimos preparar la subida del archivo.')
@@ -94,6 +101,30 @@ export function saveLicenseKey(key: string): void {
   } catch {
     // Not persisting is fine; the in-memory value still works for this session.
   }
+}
+
+export type LicenseState = 'active' | 'exhausted' | 'expired' | 'revoked'
+
+export interface LicenseStatus {
+  state: LicenseState
+  usable: boolean
+  totalUses: number
+  remainingUses: number
+  // ISO instant; null for old keys issued before monthly expiry existed.
+  expiresAt: string | null
+}
+
+/** Read-only look at a key: how many uses are left and when it expires. Charges nothing. */
+export async function fetchLicenseStatus(licenseKey: string): Promise<LicenseStatus> {
+  const res = await fetch(`${API_BASE_URL}/license-status`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ licenseKey: licenseKey.trim() }),
+  })
+  if (!res.ok) {
+    throw new ApiError((await safeErrorMessage(res)) ?? 'No pudimos verificar la clave.')
+  }
+  return res.json() as Promise<LicenseStatus>
 }
 
 export async function startAnalysis(objectKey: string, licenseKey: string): Promise<string> {

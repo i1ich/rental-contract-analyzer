@@ -9,11 +9,13 @@ import com.leaselens.model.AnalyzeContractRequest;
 import com.leaselens.service.AnalysisJobStore;
 import com.leaselens.service.AnalysisWorkerInvoker;
 import com.leaselens.service.DisclaimerGate;
+import com.leaselens.service.LicenseGate;
 import com.leaselens.service.LicenseStore;
 import com.leaselens.service.LambdaAnalysisWorkerInvoker;
 import com.leaselens.service.ServiceException;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -27,6 +29,7 @@ import java.util.UUID;
  *       {@code jobId} in milliseconds.</li>
  *   <li>{@code GET /analyze/{jobId}} — reports {@code pending}, the finished analysis, or the
  *       recorded failure.</li>
+ *   <li>{@code POST /license-status} — read-only look at a key's remaining uses and expiry.</li>
  * </ul>
  *
  * <p>This endpoint used to do the analysis inline and return the result. It could not: API
@@ -79,6 +82,10 @@ public class AnalyzeContractHandler implements
         try {
             String method = event == null || event.getHttpMethod() == null
                     ? "POST" : event.getHttpMethod().toUpperCase();
+            String path = event == null || event.getPath() == null ? "" : event.getPath();
+            if (path.endsWith("/license-status")) {
+                return licenseStatus(event);
+            }
             return "GET".equals(method) ? getJobStatus(event) : startJob(event);
         } catch (ServiceException e) {
             Log.warn("request_failed", "status", 502, "reason", e.getMessage());
@@ -110,11 +117,7 @@ public class AnalyzeContractHandler implements
             Log.warn("disclaimer_rejected", "status", 400,
                     "sentVersion", request.getDisclaimerVersion(),
                     "accepted", request.getDisclaimerAccepted());
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("error", "Para analizar un contrato tenés que leer y aceptar el aviso legal.");
-            body.put("code", DisclaimerGate.ERROR_CODE);
-            body.put("currentVersion", DisclaimerGate.CURRENT_VERSION);
-            return jsonResponse(400, body);
+            return jsonResponse(400, DisclaimerGate.rejectionBody());
         }
 
         // T18 gate: one cheap read, before any job record, OCR or LLM spend. Nothing is charged
@@ -147,25 +150,51 @@ public class AnalyzeContractHandler implements
 
     /** Returns the response that turns this key away, or {@code null} if it may proceed. */
     private APIGatewayProxyResponseEvent checkLicense(String licenseKey) {
-        String keyPrefix = LicenseStore.keyPrefix(licenseKey);
-        if (licenseKey == null || licenseKey.isEmpty()) {
-            Log.warn("license_rejected", "status", 401, "reason", "missing");
-            return jsonResponse(401, Map.of("error", "Ingresá tu clave de acceso para analizar un contrato."));
+        LicenseGate.Rejection rejection = LicenseGate.check(licenseStore, licenseKey, Instant.now());
+        if (rejection == null) {
+            return null;
         }
-        LicenseStore.License license = licenseStore.find(licenseKey);
+        Log.warn("license_rejected", "status", rejection.status(), "reason", rejection.reason(),
+                "keyPrefix", LicenseStore.keyPrefix(licenseKey));
+        return jsonResponse(rejection.status(), rejection.body());
+    }
+
+    /**
+     * {@code POST /license-status} — lets a user paste a key and see what is left of it. Read-only
+     * (nothing is charged) and needs no disclaimer: no file or contract is involved. The body
+     * carries only usage numbers and the expiry — never the owner label or the model.
+     */
+    private APIGatewayProxyResponseEvent licenseStatus(APIGatewayProxyRequestEvent event) {
+        AnalyzeContractRequest request = parseRequest(event);
+        String key = LicenseStore.normalize(request.getLicenseKey());
+        if (key == null || key.isEmpty()) {
+            Log.warn("license_status_rejected", "status", 401, "reason", "missing");
+            return jsonResponse(401, Map.of("error", "Ingresá tu clave de acceso."));
+        }
+        LicenseStore.License license = licenseStore.find(key);
         if (license == null) {
-            Log.warn("license_rejected", "status", 403, "reason", "unknown", "keyPrefix", keyPrefix);
+            Log.warn("license_status_rejected", "status", 403, "reason", "unknown",
+                    "keyPrefix", LicenseStore.keyPrefix(key));
             return jsonResponse(403, Map.of("error", "La clave de acceso no es válida."));
         }
+        Instant now = Instant.now();
+        String state;
         if (license.status() == LicenseStore.Status.REVOKED) {
-            Log.warn("license_rejected", "status", 403, "reason", "revoked", "keyPrefix", keyPrefix);
-            return jsonResponse(403, Map.of("error", "Esta clave de acceso ya no está activa."));
+            state = "revoked";
+        } else if (license.isExpired(now)) {
+            state = "expired";
+        } else if (license.remainingUses() <= 0) {
+            state = "exhausted";
+        } else {
+            state = "active";
         }
-        if (!license.isUsable()) {
-            Log.warn("license_rejected", "status", 403, "reason", "exhausted", "keyPrefix", keyPrefix);
-            return jsonResponse(403, Map.of("error", "Esta clave de acceso ya usó todos sus análisis."));
-        }
-        return null;
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("state", state);
+        body.put("usable", license.isUsable(now));
+        body.put("totalUses", license.totalUses());
+        body.put("remainingUses", license.remainingUses());
+        body.put("expiresAt", license.expiresAt() == null ? null : license.expiresAt().toString());
+        return jsonResponse(200, body);
     }
 
     /** {@code GET /analyze/{jobId}} — report progress, the result, or the recorded failure. */

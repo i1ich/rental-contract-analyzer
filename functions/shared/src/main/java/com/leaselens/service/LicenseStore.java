@@ -9,6 +9,8 @@ import software.amazon.awssdk.services.dynamodb.model.ReturnValue;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -18,8 +20,10 @@ import java.util.Map;
  *
  * <p>Shares the {@code leaselens-analyses} DynamoDB table with the result cache, job records and
  * OCR cache, distinguished by a {@code "license#"}-prefixed partition key — the same convention as
- * {@code "job#"} and {@code "ocr#"}. Unlike those, license records carry no {@code ttl}: a key
- * expires by running out of uses, never by the clock.
+ * {@code "job#"} and {@code "ocr#"}. Unlike those, license records carry no DynamoDB {@code ttl}
+ * (the record must outlive the key so a status check can say "expired"). A key stops working by
+ * running out of uses, or at its {@code expiresAt} (the next 15th after creation), which is
+ * checked on every read rather than by any scheduled job.
  *
  * <p>Checking and charging are deliberately separate. {@link #find} is a cheap read used to turn
  * away bad keys before any OCR/LLM money is spent; {@link #consumeOne} is the only thing that
@@ -33,11 +37,39 @@ public class LicenseStore {
     public enum Status { ACTIVE, EXHAUSTED, REVOKED }
 
     /** Immutable snapshot of a license record. */
-    public record License(int totalUses, int remainingUses, Status status, String model) {
-        /** A key can start a new analysis only if it is active and has uses left. */
-        public boolean isUsable() {
-            return status == Status.ACTIVE && remainingUses > 0;
+    public record License(int totalUses, int remainingUses, Status status, String model, Instant expiresAt) {
+        /**
+         * True once {@code expiresAt} has been reached. A record with no {@code expiresAt} (keys
+         * issued before monthly expiry existed) never expires on its own; give it one with the
+         * backfill command in docs/DEPLOYMENT.md.
+         */
+        public boolean isExpired(Instant now) {
+            return expiresAt != null && !now.isBefore(expiresAt);
         }
+
+        /** A key can start a new analysis only if it is active, unexpired and has uses left. */
+        public boolean isUsable(Instant now) {
+            return status == Status.ACTIVE && remainingUses > 0 && !isExpired(now);
+        }
+
+        public boolean isUsable() {
+            return isUsable(Instant.now());
+        }
+    }
+
+    /**
+     * The next 15th of a month, 00:00 UTC, strictly after {@code from}'s date: from the 1st-14th
+     * that is this month's 15th, from the 15th onwards it is next month's. So a key created
+     * 2026-11-18 expires 2026-12-15 and one created 2026-11-10 expires 2026-11-15. The same rule is
+     * implemented in scripts/new-license-key.ps1.
+     */
+    public static Instant nextExpiry(Instant from) {
+        LocalDate day = from.atZone(ZoneOffset.UTC).toLocalDate();
+        LocalDate fifteenth = day.withDayOfMonth(15);
+        if (day.getDayOfMonth() >= 15) {
+            fifteenth = fifteenth.plusMonths(1);
+        }
+        return fifteenth.atStartOfDay(ZoneOffset.UTC).toInstant();
     }
 
     private final DynamoDbClient dynamoDb;
@@ -83,7 +115,9 @@ public class LicenseStore {
                 Integer.parseInt(item.get("totalUses").n()),
                 Integer.parseInt(item.get("remainingUses").n()),
                 status,
-                item.get("model") == null ? null : item.get("model").s());
+                item.get("model") == null ? null : item.get("model").s(),
+                item.get("expiresAt") == null || item.get("expiresAt").s() == null
+                        ? null : Instant.parse(item.get("expiresAt").s()));
     }
 
     /**
@@ -126,6 +160,11 @@ public class LicenseStore {
      * The model lives on the record, never derived from the key's text: a prefix is only a label.
      */
     public void create(String key, int totalUses, String ownerLabel, String model) {
+        create(key, totalUses, ownerLabel, model, nextExpiry(Instant.now()));
+    }
+
+    /** As above, with an explicit expiry ({@code null} = never expires). */
+    public void create(String key, int totalUses, String ownerLabel, String model, Instant expiresAt) {
         requireTable();
         Map<String, AttributeValue> item = new HashMap<>(partitionKey(key));
         item.put("totalUses", number(totalUses));
@@ -133,6 +172,9 @@ public class LicenseStore {
         item.put("status", AttributeValue.builder().s("active").build());
         item.put("ownerLabel", AttributeValue.builder().s(ownerLabel == null ? "" : ownerLabel).build());
         item.put("createdAt", AttributeValue.builder().s(Instant.now().toString()).build());
+        if (expiresAt != null) {
+            item.put("expiresAt", AttributeValue.builder().s(expiresAt.toString()).build());
+        }
         if (model != null && !model.isBlank()) {
             item.put("model", AttributeValue.builder().s(model.trim()).build());
         }

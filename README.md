@@ -37,12 +37,13 @@ infrastructure, React/TS/Vite PWA on S3 + CloudFront.
 | Stack | Contents |
 |---|---|
 | `LeaseLensStorageStack` | Upload bucket (S3-managed encryption, **24h lifecycle expiry**, CORS) · `Analyses` DynamoDB table keyed by `contentHash`, items expire via `ttl` |
-| `LeaseLensApiStack` | REST API (`POST /upload-url`, `POST /analyze`, `GET /analyze/{jobId}`, throttled 5 rps / burst 10) · four Java 21 Lambdas: `GenerateUploadUrlFn`, `ExtractTextFn`, `AnalyzeContractFn`, `AnalyzeWorkerFn` |
+| `LeaseLensApiStack` | REST API (`POST /upload-url`, `POST /analyze`, `GET /analyze/{jobId}`, `POST /license-status`, throttled 5 rps / burst 10) · four Java 21 Lambdas: `GenerateUploadUrlFn`, `ExtractTextFn`, `AnalyzeContractFn`, `AnalyzeWorkerFn` |
 | `LeaseLensFrontendStack` | Private S3 site bucket + CloudFront (OAI). Site content is synced manually — CDK's `BucketDeployment` is deliberately unused (see `docs/DEPLOYMENT.md`) |
 
 ```
 functions/        Java 21 Lambda modules (Maven)
-  generate-upload-url/  presigned PUT + declared-size guard
+  generate-upload-url/  presigned PUT + declared-size guard, disclaimer + license gate
+  shared/               DisclaimerGate / LicenseStore / LicenseGate, compiled into both gated Lambdas
   extract-text/         PDFBox text layer, vision-OCR fallback, ETag-keyed OCR cache
   analyze-contract/     async API handler + worker, OpenRouter analysis, content-hash cache
 infrastructure/   AWS CDK app (Java), one stack per concern
@@ -64,10 +65,14 @@ without a redeploy.
 - Explicit **cross-border data transfer consent** gate before upload, on the basis of Uruguay's
   Ley 18.331 art. 23 (the LLM call leaves the country); copy is draft pending the legal review
 - Mandatory disclaimer: *"herramienta educativa, no es asesoramiento legal"*
-- **API-enforced disclaimer acceptance**: `POST /analyze` returns 400 `DISCLAIMER_NOT_ACCEPTED`
-  unless the request carries `disclaimerAccepted: true` and the current `disclaimerVersion`
+- **API-enforced disclaimer acceptance**: `POST /upload-url` and `POST /analyze` return 400
+  `DISCLAIMER_NOT_ACCEPTED` unless the request carries `disclaimerAccepted: true` and the current `disclaimerVersion`
   (text + version + hash in `frontend/src/legal/`). The UI checkbox is unticked on every analysis.
   Draft text, not yet lawyer-reviewed.
+- **Usage-limited license keys**: both endpoints also need a valid `licenseKey` (checked before S3
+  or any LLM spend; a use is charged only when an analysis succeeds). Keys **expire on the next
+  15th after creation** and are renewed by hand with `scripts/new-license-key.ps1` — see
+  `docs/DEPLOYMENT.md`. Pasting a key in the UI shows its remaining uses and expiry.
 
 ## Quality gate
 

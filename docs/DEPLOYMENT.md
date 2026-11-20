@@ -108,8 +108,10 @@ needed:
 # 1. Get a presigned PUT URL + object key.
 curl -X POST https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod/upload-url \
   -H 'Content-Type: application/json' \
-  -d '{"fileSizeBytes": 123456}'
+  -d '{"fileSizeBytes": 123456, "licenseKey": "<access key>",
+       "disclaimerAccepted": true, "disclaimerVersion": "<version in frontend/src/legal/disclaimer.json>"}'
 # => {"uploadUrl": "...", "objectKey": "uploads/<uuid>.pdf", "requiredContentType": "application/pdf", "expiresInSeconds": 900}
+#    Gated like step 3: without a valid key and the accepted disclaimer there is no URL at all.
 
 # 2. PUT the PDF to that URL — Content-Type MUST match requiredContentType exactly, or S3
 #    rejects the signature (403).
@@ -133,7 +135,7 @@ curl https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod/analyze/<jobId>
 
 ### Disclaimer gate (smoke-test on every deploy)
 
-`POST /analyze` refuses unless the request itself carries `disclaimerAccepted: true` and the
+`POST /upload-url` and `POST /analyze` both refuse unless the request itself carries `disclaimerAccepted: true` and the
 `disclaimerVersion` currently in `frontend/src/legal/disclaimer.json` (enforced by
 `DisclaimerGate.CURRENT_VERSION`; per request, always on, checked before the license, any job
 record, OCR or LLM spend). A UI-only checkbox would be bypassable, so this is the real gate. After
@@ -146,7 +148,43 @@ curl -s -w '
 ' -X POST https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod/analyze   -H 'Content-Type: application/json' -d '{"objectKey": "uploads/none.pdf", "licenseKey": "x"}'
 # Same with "disclaimerAccepted": false, or a wrong "disclaimerVersion": also 400, same code.
 # With the current version and a bad key the disclaimer passes and the license gate answers 403.
+
+# The same three checks against /upload-url — the bypass this endpoint used to have: a bare curl
+# must NOT get an "uploadUrl". Order is disclaimer (400) -> license (401/403) -> S3.
+curl -s -w '
+%{http_code}
+' -X POST https://<api-id>.execute-api.sa-east-1.amazonaws.com/prod/upload-url   -H 'Content-Type: application/json' -d '{}'
+# => 400 DISCLAIMER_NOT_ACCEPTED, no "uploadUrl". With the current disclaimer fields but no
+#    "licenseKey": 401. With a wrong key: 403. Only a valid key + current disclaimer returns 200.
 ```
+
+### License keys: monthly expiry and remaining uses
+
+Every key expires at **00:00 UTC on the next 15th after it was created** (created 2026-11-18 →
+expires 2026-12-15; created 2026-11-10 → 2026-11-15; created on a 15th → next month's 15th). It is
+a plain `expiresAt` attribute on the license record, checked in the same `LicenseStore` read that
+runs on every `/upload-url` and `/analyze` call (`LicenseGate`) — no EventBridge, no extra Lambda.
+Early revocation is independent of it: set `status` to `revoked` on the record.
+
+- **Renewal is manual.** After the 15th the old key answers 403 with
+  `{"code":"LICENSE_EXPIRED"}` (the generic 403 would be less code, but "get a new key" needs a
+  different reaction than "try again", and it costs one extra field). Issue a replacement with
+  `./scripts/new-license-key.ps1 -Owner "<name>" -Prefix usr1` — **do this for `usr1_` after every
+  15th**, or the app will answer 403. There is no auto-renewal and no notification.
+- **Keys issued before this feature have no `expiresAt` and never expire.** Backfill an existing
+  key once (replace the key; this one is `usr1_…`'s, upper-cased, as stored):
+
+  ```sh
+  aws dynamodb update-item --region sa-east-1 --table-name leaselens-analyses     --key '{"contentHash":{"S":"license#<KEY UPPER-CASE>"}}'     --update-expression 'SET expiresAt = :e'     --expression-attribute-values '{":e":{"S":"2026-12-15T00:00:00Z"}}'
+  ```
+- **Checking a key.** `POST /license-status` with `{"licenseKey": "..."}` returns
+  `{"state": "active|exhausted|expired|revoked", "usable": bool, "totalUses", "remainingUses",
+  "expiresAt"}` (403 for an unknown key). Read-only, charges nothing, needs no disclaimer, never
+  returns the owner label or model. The frontend calls it when a key is pasted and shows "Te
+  quedan N de M análisis · vence el 15 de …". Smoke test:
+  `curl -X POST .../prod/license-status -H 'Content-Type: application/json' -d '{"licenseKey":"<key>"}'`.
+- The 15th is evaluated in UTC (sa-east-1 is UTC-3, so a key stops working at 21:00 local time on
+  the 14th).
 
 Changing the text: edit `disclaimer.es.md`, bump `version` and `sha256` in `disclaimer.json` and
 `DisclaimerGate.CURRENT_VERSION`, then redeploy backend and frontend together (`DisclaimerGateTest`

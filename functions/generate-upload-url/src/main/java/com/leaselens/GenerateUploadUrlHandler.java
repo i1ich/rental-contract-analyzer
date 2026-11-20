@@ -6,9 +6,14 @@ import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyRequestEvent;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyResponseEvent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.leaselens.service.DisclaimerGate;
+import com.leaselens.service.LicenseGate;
+import com.leaselens.service.LicenseStore;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 
 /**
@@ -17,6 +22,11 @@ import java.util.Map;
  *
  * <p>Behind API Gateway (unlike extract-text/analyze-contract's Lambda-to-Lambda calls), so
  * this works with the API Gateway proxy envelope, mirroring {@code AnalyzeContractHandler}.
+ *
+ * <p>Gated exactly like {@code POST /analyze}: without it a bare {@code curl} would get a working
+ * upload URL and land a file in S3 with no key and no disclaimer on record. Order is cheapest
+ * first and always before S3: disclaimer (pure check), then license (one read-only DynamoDB get,
+ * never charged here — a use is spent only by the analysis worker), then the presigner.
  */
 public class GenerateUploadUrlHandler implements
         RequestHandler<APIGatewayProxyRequestEvent, APIGatewayProxyResponseEvent> {
@@ -41,16 +51,25 @@ public class GenerateUploadUrlHandler implements
 
     private final String bucketName;
     private final S3Presigner presigner;
+    private final LicenseStore licenseStore;
+    private final boolean licenseRequired;
 
-    /** No-arg constructor used by the Lambda runtime: wires up the real S3 presigner. */
+    /**
+     * No-arg constructor used by the Lambda runtime: wires up the real S3 presigner and DynamoDB.
+     * License enforcement follows the same {@code LICENSE_REQUIRED} variable as analyze-contract.
+     */
     public GenerateUploadUrlHandler() {
-        this(System.getenv("BUCKET_NAME"), S3Presigner.create());
+        this(System.getenv("BUCKET_NAME"), S3Presigner.create(), DynamoDbClient.create(),
+                "true".equalsIgnoreCase(System.getenv("LICENSE_REQUIRED")));
     }
 
-    /** Package-private constructor for tests: allows injecting a presigner with fake credentials. */
-    GenerateUploadUrlHandler(String bucketName, S3Presigner presigner) {
+    /** Package-private constructor for tests: injects a fake-credential presigner and DynamoDB. */
+    GenerateUploadUrlHandler(String bucketName, S3Presigner presigner, DynamoDbClient dynamoDb,
+                             boolean licenseRequired) {
         this.bucketName = bucketName;
         this.presigner = presigner;
+        this.licenseStore = new LicenseStore(dynamoDb, System.getenv("TABLE_NAME"));
+        this.licenseRequired = licenseRequired;
     }
 
     @Override
@@ -62,7 +81,31 @@ public class GenerateUploadUrlHandler implements
             return jsonResponse(500, Map.of("error", "Error interno del servidor"));
         }
 
-        Long declaredSizeBytes = parseDeclaredSizeBytes(event);
+        JsonNode request = parseBody(event);
+
+        // Disclaimer gate first: a pure check, and the same one /analyze applies.
+        Boolean accepted = request.path("disclaimerAccepted").isBoolean()
+                ? request.get("disclaimerAccepted").asBoolean() : null;
+        String version = request.path("disclaimerVersion").isTextual()
+                ? request.get("disclaimerVersion").asText() : null;
+        if (!DisclaimerGate.isAccepted(accepted, version)) {
+            Log.warn("disclaimer_rejected", "status", 400, "sentVersion", version, "accepted", accepted);
+            return jsonResponse(400, DisclaimerGate.rejectionBody());
+        }
+
+        // License gate: read-only, nothing is charged here.
+        if (licenseRequired) {
+            String licenseKey = LicenseStore.normalize(
+                    request.path("licenseKey").isTextual() ? request.get("licenseKey").asText() : null);
+            LicenseGate.Rejection rejection = LicenseGate.check(licenseStore, licenseKey, Instant.now());
+            if (rejection != null) {
+                Log.warn("license_rejected", "status", rejection.status(), "reason", rejection.reason(),
+                        "keyPrefix", LicenseStore.keyPrefix(licenseKey));
+                return jsonResponse(rejection.status(), rejection.body());
+            }
+        }
+
+        Long declaredSizeBytes = declaredSizeBytes(request);
         if (declaredSizeBytes != null && declaredSizeBytes > MAX_UPLOAD_SIZE_BYTES) {
             Log.warn("upload_rejected", "reason", "too-large",
                     "declaredSizeBytes", declaredSizeBytes, "maxBytes", MAX_UPLOAD_SIZE_BYTES);
@@ -85,19 +128,24 @@ public class GenerateUploadUrlHandler implements
                 "expiresInSeconds", result.expiresInSeconds()));
     }
 
-    /** Request body is optional: {@code {"fileSizeBytes": <number>}}. Missing/invalid → no size check. */
-    private Long parseDeclaredSizeBytes(APIGatewayProxyRequestEvent event) {
+    /** The JSON body, or an empty node when it is missing or not valid JSON (which the gates then refuse). */
+    private JsonNode parseBody(APIGatewayProxyRequestEvent event) {
         String body = event.getBody();
         if (body == null || body.isBlank()) {
-            return null;
+            return MAPPER.createObjectNode();
         }
         try {
             JsonNode root = MAPPER.readTree(body);
-            JsonNode sizeNode = root.get("fileSizeBytes");
-            return (sizeNode != null && sizeNode.isNumber()) ? sizeNode.asLong() : null;
+            return root.isObject() ? root : MAPPER.createObjectNode();
         } catch (Exception e) {
-            return null;
+            return MAPPER.createObjectNode();
         }
+    }
+
+    /** {@code fileSizeBytes} is optional. Missing/invalid → no size check. */
+    private Long declaredSizeBytes(JsonNode request) {
+        JsonNode sizeNode = request.get("fileSizeBytes");
+        return (sizeNode != null && sizeNode.isNumber()) ? sizeNode.asLong() : null;
     }
 
     private APIGatewayProxyResponseEvent jsonResponse(int statusCode, Object body) {

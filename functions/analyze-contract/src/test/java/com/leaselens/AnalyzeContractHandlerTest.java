@@ -10,6 +10,8 @@ import com.leaselens.service.AnalysisWorkerInvoker;
 import com.leaselens.service.LicenseStore;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -250,6 +252,134 @@ class AnalyzeContractHandlerTest {
                 .handleRequest(getStatusOf("job-1"), null);
 
         assertEquals(283, MAPPER.readTree(status.getBody()).get("remainingUses").asInt());
+    }
+
+    // ---- Monthly expiry ---------------------------------------------------------------------
+
+    @Test
+    void expiredKeyIsRejectedWith403AndTheExpiredCodeAndNothingStarts() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        new LicenseStore(db, TABLE).create("LL-AAAA-BBBB", 300, "friend", null,
+                Instant.now().minus(1, ChronoUnit.DAYS));
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+
+        APIGatewayProxyResponseEvent response =
+                licensedHandler(db, worker).handleRequest(postWithLicense("LL-AAAA-BBBB"), null);
+
+        assertEquals(403, response.getStatusCode());
+        assertEquals("LICENSE_EXPIRED", MAPPER.readTree(response.getBody()).get("code").asText());
+        assertTrue(worker.startedJobIds.isEmpty());
+    }
+
+    @Test
+    void aFreshlyIssuedKeyWorksAgainAfterTheOldOneExpired() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        LicenseStore licenses = new LicenseStore(db, TABLE);
+        licenses.create("USR1_OLD", 300, "me", null, Instant.now().minus(1, ChronoUnit.DAYS));
+        licenses.create("USR1_NEW", 300, "me");
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+
+        assertEquals(403, licensedHandler(db, worker).handleRequest(postWithLicense("USR1_OLD"), null).getStatusCode());
+        assertEquals(202, licensedHandler(db, worker).handleRequest(postWithLicense("USR1_NEW"), null).getStatusCode());
+    }
+
+    // ---- POST /license-status ---------------------------------------------------------------
+
+    private static APIGatewayProxyRequestEvent statusRequest(String licenseKey) throws Exception {
+        Map<String, Object> body = new java.util.HashMap<>();
+        if (licenseKey != null) {
+            body.put("licenseKey", licenseKey);
+        }
+        APIGatewayProxyRequestEvent event = postWith(MAPPER.writeValueAsString(body));
+        event.setPath("/license-status");
+        return event;
+    }
+
+    private static JsonNode licenseStatusOf(FakeDynamoDbClient db, String key) throws Exception {
+        APIGatewayProxyResponseEvent response = new AnalyzeContractHandler(db, new RecordingWorkerInvoker())
+                .handleRequest(statusRequest(key), null);
+        assertEquals(200, response.getStatusCode());
+        return MAPPER.readTree(response.getBody());
+    }
+
+    @Test
+    void licenseStatusReportsRemainingUsesAndExpiry() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        LicenseStore licenses = new LicenseStore(db, TABLE);
+        Instant expiry = Instant.parse("2099-12-15T00:00:00Z");
+        licenses.create("LL-AAAA-BBBB", 300, "friend", null, expiry);
+        licenses.consumeOne("LL-AAAA-BBBB");
+
+        JsonNode status = licenseStatusOf(db, "  ll-aaaa-bbbb ");
+
+        assertEquals("active", status.get("state").asText());
+        assertTrue(status.get("usable").asBoolean());
+        assertEquals(300, status.get("totalUses").asInt());
+        assertEquals(299, status.get("remainingUses").asInt());
+        assertEquals("2099-12-15T00:00:00Z", status.get("expiresAt").asText());
+    }
+
+    @Test
+    void licenseStatusDoesNotChargeAUseOrRevealOwnerOrModel() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        new LicenseStore(db, TABLE).create("LL-AAAA-BBBB", 300, "secret owner", "some/model");
+
+        JsonNode status = licenseStatusOf(db, "LL-AAAA-BBBB");
+
+        assertEquals(300, new LicenseStore(db, TABLE).find("LL-AAAA-BBBB").remainingUses());
+        assertFalse(status.toString().contains("secret owner"));
+        assertFalse(status.has("model"));
+        assertFalse(status.has("ownerLabel"));
+    }
+
+    @Test
+    void licenseStatusSaysExpiredExhaustedAndRevoked() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        LicenseStore licenses = new LicenseStore(db, TABLE);
+        licenses.create("EXPIRED_KEY", 300, "a", null, Instant.now().minus(1, ChronoUnit.DAYS));
+        licenses.create("USED_UP_KEY", 1, "b");
+        licenses.consumeOne("USED_UP_KEY");
+
+        JsonNode expired = licenseStatusOf(db, "EXPIRED_KEY");
+        assertEquals("expired", expired.get("state").asText());
+        assertFalse(expired.get("usable").asBoolean());
+        assertEquals(300, expired.get("remainingUses").asInt());
+
+        JsonNode exhausted = licenseStatusOf(db, "USED_UP_KEY");
+        assertEquals("exhausted", exhausted.get("state").asText());
+        assertEquals(0, exhausted.get("remainingUses").asInt());
+    }
+
+    @Test
+    void licenseStatusOfALegacyKeyWithoutExpiryHasNullExpiresAt() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        new LicenseStore(db, TABLE).create("LEGACY_KEY", 300, "me", null, null);
+
+        JsonNode status = licenseStatusOf(db, "LEGACY_KEY");
+
+        assertEquals("active", status.get("state").asText());
+        assertTrue(status.get("expiresAt").isNull());
+    }
+
+    @Test
+    void licenseStatusRefusesAMissingOrUnknownKey() throws Exception {
+        AnalyzeContractHandler handler = new AnalyzeContractHandler(new FakeDynamoDbClient(), new RecordingWorkerInvoker());
+
+        assertEquals(401, handler.handleRequest(statusRequest(null), null).getStatusCode());
+        assertEquals(403, handler.handleRequest(statusRequest("LL-NOPE"), null).getStatusCode());
+    }
+
+    @Test
+    void licenseStatusNeedsNoDisclaimerAndStartsNoJob() throws Exception {
+        FakeDynamoDbClient db = new FakeDynamoDbClient();
+        new LicenseStore(db, TABLE).create("LL-AAAA-BBBB", 5, "friend");
+        RecordingWorkerInvoker worker = new RecordingWorkerInvoker();
+
+        APIGatewayProxyResponseEvent response =
+                new AnalyzeContractHandler(db, worker).handleRequest(statusRequest("LL-AAAA-BBBB"), null);
+
+        assertEquals(200, response.getStatusCode());
+        assertTrue(worker.startedJobIds.isEmpty());
     }
 
     // ---- Disclaimer gate --------------------------------------------------------------------
